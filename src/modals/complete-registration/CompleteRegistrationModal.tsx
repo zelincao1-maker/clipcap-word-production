@@ -85,6 +85,20 @@ export function CompleteRegistrationModal({
     wasAuthenticatedRef.current = isAuthenticated;
   }, [isAuthenticated]);
 
+  const appOrigin = useMemo(() => {
+    const configuredOrigin = process.env.NEXT_PUBLIC_APP_URL?.trim();
+
+    if (configuredOrigin) {
+      return configuredOrigin.replace(/\/+$/, '');
+    }
+
+    if (typeof window !== 'undefined') {
+      return window.location.origin;
+    }
+
+    return '';
+  }, []);
+
   const handleEmailAuth = async () => {
     if (!email.trim()) {
       notifications.show({
@@ -105,7 +119,7 @@ export function CompleteRegistrationModal({
         },
         body: JSON.stringify({
           email: email.trim().toLowerCase(),
-          redirectTo: `${window.location.origin}/auth/callback?next=/home`,
+          redirectTo: `${appOrigin}/auth/callback?next=/`,
           turnstileToken: turnstileToken || undefined,
         }),
       });
