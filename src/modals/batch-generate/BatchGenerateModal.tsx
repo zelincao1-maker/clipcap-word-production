@@ -115,10 +115,6 @@ export function BatchGenerateModal({
       queryClient.invalidateQueries({ queryKey: ['saved-templates'] }),
     ]);
   };
-  const closeModalWithRefresh = async () => {
-    await refreshTaskLists();
-    context.closeModal(id);
-  };
 
   const selectedFiles = rows.map((row) => row.file).filter((file): file is File => Boolean(file));
 
@@ -139,6 +135,16 @@ export function BatchGenerateModal({
   const failedCount = taskItems.filter((item) => item.status === 'failed').length;
   const progressValue =
     taskItems.length > 0 ? ((succeededCount + failedCount) / taskItems.length) * 100 : 0;
+  const canCloseTaskModal =
+    !isPreparingFiles && (!taskId || (!taskQuery.isLoading && !hasRunningItems));
+  const closeModalWithRefresh = () => {
+    if (!canCloseTaskModal) {
+      return;
+    }
+
+    context.closeModal(id);
+    void refreshTaskLists();
+  };
 
   useEffect(() => {
     if (!hasRunningItems) {
@@ -407,7 +413,7 @@ export function BatchGenerateModal({
               添加记录
             </Button>
             <Group>
-              <Button color="gray" radius="xl" variant="subtle" onClick={() => void closeModalWithRefresh()}>
+              <Button color="gray" radius="xl" variant="subtle" onClick={closeModalWithRefresh}>
                 取消
               </Button>
               <Button
@@ -535,7 +541,11 @@ export function BatchGenerateModal({
             >
               刷新状态
             </Button>
-            <Button radius="xl" onClick={() => void closeModalWithRefresh()}>
+            <Button
+              disabled={!canCloseTaskModal}
+              radius="xl"
+              onClick={closeModalWithRefresh}
+            >
               关闭
             </Button>
           </Group>

@@ -1,12 +1,14 @@
-import { Stack } from '@mantine/core';
-import { LandingFeatures } from './_components/LandingFeatures';
-import { LandingHero } from './_components/LandingHero';
+import { Container, Stack } from '@mantine/core';
+import { HomeHero } from '@/src/app/(authenticated)/(home)/home/_components/HomeHero';
+import { HomeRecentProjects } from '@/src/app/(authenticated)/(home)/home/_components/HomeRecentProjects';
 
 export default function LandingPage() {
   return (
-    <Stack gap={0}>
-      <LandingHero />
-      <LandingFeatures />
-    </Stack>
+    <Container py={28}>
+      <Stack gap={40}>
+        <HomeHero />
+        <HomeRecentProjects />
+      </Stack>
+    </Container>
   );
 }

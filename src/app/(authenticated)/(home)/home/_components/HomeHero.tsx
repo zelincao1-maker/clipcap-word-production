@@ -207,6 +207,8 @@ export function HomeHero() {
           withCloseButton: true,
         });
 
+        notifications.hide(notificationId);
+
         startTransition(() => {
           router.push('/documents/slot-review');
         });

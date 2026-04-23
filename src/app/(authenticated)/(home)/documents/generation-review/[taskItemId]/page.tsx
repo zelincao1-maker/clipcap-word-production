@@ -36,6 +36,7 @@ import {
 } from '@/src/querys/use-generation-task-runtime';
 import { useJsonPreviewDebug } from '@/src/lib/debug/json-preview-toggle';
 import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
+import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 import type {
   DocBlock,
   ParagraphBlock,
@@ -92,7 +93,7 @@ function normalizeExtractedItems(value: unknown): EditableReviewedItem[] {
 
     return {
       slot_key: String(record.slot_key ?? `slot-${index + 1}`),
-      field_category: String(record.field_category ?? ''),
+      field_category: normalizeSlotCategoryLabel(String(record.field_category ?? '')),
       meaning_to_applicant: String(record.meaning_to_applicant ?? ''),
       original_value: String(record.original_value ?? ''),
       evidence: String(record.evidence ?? ''),
@@ -135,7 +136,7 @@ function normalizeTemplateOriginalSlots(value: unknown): TemplateOriginalSlot[] 
 
       return {
         slot_key: `${paragraphIndex}-${itemIndex}-${sequence}`,
-        field_category: String(record.field_category ?? ''),
+        field_category: normalizeSlotCategoryLabel(String(record.field_category ?? '')),
         meaning_to_applicant: String(record.meaning_to_applicant ?? ''),
         original_value: String(record.original_value ?? ''),
         original_doc_position: String(record.original_doc_position ?? ''),

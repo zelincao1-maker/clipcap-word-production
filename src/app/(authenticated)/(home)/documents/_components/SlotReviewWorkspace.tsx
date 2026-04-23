@@ -8,6 +8,7 @@ import { useRouter } from 'next/navigation';
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import type { ExtractionItem, ExtractionParagraph } from '@/src/app/api/types/template-slot-extraction';
 import { useJsonPreviewDebug } from '@/src/lib/debug/json-preview-toggle';
+import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 import {
   SLOT_REVIEW_SESSION_KEY,
   type SlotReviewSessionPayload,
@@ -789,6 +790,7 @@ function loadSlotReviewWorkspaceState(): SlotReviewWorkspaceState {
   const flattenedItems = parsed.extractionResult.flatMap((paragraph: ExtractionParagraph, paragraphIndex) =>
     paragraph.items.map((item, itemIndex) => ({
       ...item,
+      field_category: normalizeSlotCategoryLabel(item.field_category),
       id: `${paragraphIndex}-${itemIndex}-${item.sequence}`,
       paragraphTitle: paragraph.paragraph_title,
     })),

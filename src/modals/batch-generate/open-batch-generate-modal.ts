@@ -14,6 +14,9 @@ export function openBatchGenerateModal(input: OpenBatchGenerateModalInput) {
     centered: true,
     padding: 0,
     size: 860,
+    withCloseButton: false,
+    closeOnClickOutside: false,
+    closeOnEscape: false,
     innerProps: input,
   });
 }

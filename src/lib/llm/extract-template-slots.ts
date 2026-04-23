@@ -1,33 +1,42 @@
-import { generateObject } from 'ai';
 import mammoth from 'mammoth';
 import {
   templateSlotExtractionResultSchema,
   type TemplateSlotExtractionResult,
 } from '@/src/app/api/types/template-slot-extraction';
-import { getTextLlmModel } from '@/src/lib/llm/env';
-import { createTextLlmClient } from '@/src/lib/llm/openai-compatible';
+import {
+  getTextLlmApiKey,
+  getTextLlmBaseUrl,
+  getTextLlmModel,
+} from '@/src/lib/llm/env';
+import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 
-const EXTRACTION_SYSTEM_PROMPT = `你是法律文书模板槽位抽取助手。
-任务：只针对传入的当前段落，抽取与“被申请人 / 被告 / 借款人”等目标主体直接相关的槽位信息。
+const EXTRACTION_TIMEOUT_MS = 120000;
+const EXTRACTION_CONCURRENCY = 2;
+const EXTRACTION_MAX_RETRIES = 2;
 
-要求：
-1. 只返回 JSON，不要返回解释、Markdown 或代码块。
-2. 只抽取当前段落中实际出现的信息，不要编造，不要补全未出现的字段。
-3. items 按原文出现顺序输出，不要去重。
-4. 每次输入只代表单个段落，你只能基于当前段落输出结果。
-5. original_value 必须保持原文格式。
-6. original_doc_position 必须是能定位原文的完整短句或片段，并且必须来自当前段落。
-7. 忽略申请人、法院、仲裁委、代理人等无关主体。
-8. 默认重点字段包括：姓名、身份证号、民族、性别、出生日期、住址、联系电话、金额、百分数、日期、利率、分期期数。
-9. 如果用户补充说明里明确要求抽取其他字段，也必须一起抽取，例如车牌号、汽车品牌、车型、合同编号、银行卡号等。
-10. field_category 不必限制在默认字段范围内，只要该字段真实出现在当前段落，且符合用户要求或模板抽取目的，就可以输出。
-11. 同一段中如果出现多个日期、多个金额、多个百分数、多个利率、多个分期期数，只要它们含义不同，就必须分别输出，不能合并，也不能遗漏。
-12. 尤其要注意区分并分别抽取：签署日期、办理日期、逾期开始日期、截止日期、出生日期、还款相关日期等不同语义的日期。
+const EXTRACTION_SYSTEM_PROMPT = `
+你是中文法律文书模板槽位抽取助手。
 
-固定返回格式：
+你的基础抽取任务如下：
+1. 只处理当前传入的单个段落，只能依据当前段落内容抽取槽位。
+2. 默认优先抽取与“被申请人 / 被告 / 借款人 / 乙方 / 客户”等目标主体直接相关的信息。
+3. 默认重点关注的字段包括但不限于：姓名、身份证号、民族、性别、出生日期、住址、联系电话、金额、日期、百分比、利率、分期期数等。
+4. 如果用户提供了额外抽取要求，需要在基础抽取内容之外一并抽取这些额外字段，例如汽车牌照、汽车品牌、车型、合同编号、银行卡号等。
+
+抽取规则：
+1. 只返回 JSON，不要返回解释、Markdown、代码块或其他多余文本。
+2. 只能抽取当前段落中真实出现的信息，不要编造，也不要补全未出现的值。
+3. items 必须按照原文出现顺序输出。
+4. original_value 必须保留原文格式。
+5. original_doc_position 必须是来自当前段落、能够定位到原文的精确短语或片段。
+6. 同一段中如果出现多个不同含义的日期、金额、百分比、利率等，必须分别抽取，不能合并，也不能遗漏。
+7. field_category 必须返回中文，不要返回 vehicle_plate_number、vehicle_brand 这种英文字段名。
+8. 除非用户明确要求，否则忽略与目标主体无关的申请人、法院、仲裁委、代理人等主体信息。
+
+固定 JSON 结构：
 {
   "document_info": {
-    "document_name": "文档全称"
+    "document_name": "文件名"
   },
   "extraction_result": [
     {
@@ -37,15 +46,129 @@ const EXTRACTION_SYSTEM_PROMPT = `你是法律文书模板槽位抽取助手。
         {
           "sequence": 1,
           "paragraph_index": 0,
-          "field_category": "字段类别",
-          "original_value": "原始具体值",
-          "meaning_to_applicant": "该值对被申请人的含义",
-          "original_doc_position": "原文定位片段"
+          "field_category": "中文字段类别",
+          "original_value": "原文中的具体值",
+          "meaning_to_applicant": "这个值对目标主体的含义",
+          "original_doc_position": "来自原文的定位片段"
         }
       ]
     }
   ]
-}`;
+}`.trim();
+
+interface ExtractedParagraph {
+  paragraph_index: number;
+  paragraph_title: string;
+  paragraph_text: string;
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolveChatCompletionsUrl(baseUrl: string) {
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+
+  if (normalizedBaseUrl.endsWith('/chat/completions')) {
+    return normalizedBaseUrl;
+  }
+
+  return `${normalizedBaseUrl}/chat/completions`;
+}
+
+function normalizeJsonText(rawContent: string) {
+  const trimmed = rawContent.trim();
+  const withoutCodeFence = trimmed
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  if (withoutCodeFence.startsWith('{') || withoutCodeFence.startsWith('[')) {
+    return withoutCodeFence;
+  }
+
+  const firstBrace = withoutCodeFence.indexOf('{');
+  const lastBrace = withoutCodeFence.lastIndexOf('}');
+
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return withoutCodeFence.slice(firstBrace, lastBrace + 1);
+  }
+
+  return withoutCodeFence;
+}
+
+async function requestTextLlmJson(prompt: string) {
+  for (let attempt = 0; attempt <= EXTRACTION_MAX_RETRIES; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), EXTRACTION_TIMEOUT_MS);
+
+    try {
+      const upstream = await fetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getTextLlmApiKey()}`,
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: getTextLlmModel(),
+          messages: [
+            {
+              role: 'system',
+              content: EXTRACTION_SYSTEM_PROMPT,
+            },
+            {
+              role: 'user',
+              content: prompt,
+            },
+          ],
+        }),
+      });
+
+      if (!upstream.ok) {
+        const details = await upstream.text();
+        const isRetryable =
+          upstream.status === 408 ||
+          upstream.status === 429 ||
+          upstream.status >= 500;
+
+        if (isRetryable && attempt < EXTRACTION_MAX_RETRIES) {
+          await wait(1000 * (attempt + 1));
+          continue;
+        }
+
+        throw new Error(`Text LLM request failed (${upstream.status}): ${details}`);
+      }
+
+      const payload = await upstream.json();
+      const rawContent = payload?.choices?.[0]?.message?.content;
+
+      if (typeof rawContent !== 'string' || !rawContent.trim()) {
+        throw new Error('Text LLM returned empty content.');
+      }
+
+      return normalizeJsonText(rawContent);
+    } catch (error) {
+      const isTimeout = error instanceof DOMException && error.name === 'AbortError';
+
+      if ((isTimeout || error instanceof TypeError) && attempt < EXTRACTION_MAX_RETRIES) {
+        await wait(1000 * (attempt + 1));
+        continue;
+      }
+
+      if (isTimeout) {
+        throw new Error('Template slot extraction timed out.');
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  throw new Error('Template slot extraction timed out.');
+}
 
 export async function extractTextFromDocxBuffer(buffer: Buffer) {
   const { value } = await mammoth.extractRawText({ buffer });
@@ -56,14 +179,6 @@ export async function extractHtmlFromDocxBuffer(buffer: Buffer) {
   const { value } = await mammoth.convertToHtml({ buffer });
   return value.trim();
 }
-
-interface ExtractedParagraph {
-  paragraph_index: number;
-  paragraph_title: string;
-  paragraph_text: string;
-}
-
-const EXTRACTION_CONCURRENCY = 4;
 
 function buildParagraphTitle(paragraphText: string, paragraphIndex: number) {
   const normalized = paragraphText.replace(/\s+/g, ' ').trim();
@@ -91,8 +206,44 @@ function extractParagraphsFromRawText(uploadText: string): ExtractedParagraph[] 
     }));
 }
 
+async function extractSlotsForParagraph(params: {
+  fileName: string;
+  prompt: string;
+  paragraph: ExtractedParagraph;
+}) {
+  const userPrompt = [
+    `文件名：${params.fileName}`,
+    params.prompt
+      ? `额外抽取要求：在基础抽取内容之外，还需要额外抽取以下内容：${params.prompt}`
+      : '额外抽取要求：无，按基础抽取内容执行。',
+    `当前段落序号：${params.paragraph.paragraph_index}`,
+    `当前段落标题：${params.paragraph.paragraph_title}`,
+    '请只从下面这个段落中抽取槽位。',
+    params.paragraph.paragraph_text,
+  ].join('\n\n');
+
+  const rawJson = await requestTextLlmJson(userPrompt);
+  const parsed = JSON.parse(rawJson);
+  const object = templateSlotExtractionResultSchema.parse(parsed);
+  const extractedParagraph = object.extraction_result[0];
+
+  if (!extractedParagraph) {
+    return null;
+  }
+
+  return {
+    paragraph_index: params.paragraph.paragraph_index,
+    paragraph_title:
+      extractedParagraph.paragraph_title?.trim() || params.paragraph.paragraph_title,
+    items: extractedParagraph.items.map((item) => ({
+      ...item,
+      field_category: normalizeSlotCategoryLabel(item.field_category),
+      paragraph_index: params.paragraph.paragraph_index,
+    })),
+  };
+}
+
 async function extractParagraphsInBatches(params: {
-  provider: ReturnType<typeof createTextLlmClient>;
   fileName: string;
   prompt: string;
   paragraphs: ExtractedParagraph[];
@@ -115,7 +266,6 @@ async function extractParagraphsInBatches(params: {
     const batchResults = await Promise.all(
       batch.map((paragraph) =>
         extractSlotsForParagraph({
-          provider: params.provider,
           fileName: params.fileName,
           prompt: params.prompt,
           paragraph,
@@ -135,46 +285,6 @@ async function extractParagraphsInBatches(params: {
   return extractedParagraphs;
 }
 
-async function extractSlotsForParagraph(params: {
-  provider: ReturnType<typeof createTextLlmClient>;
-  fileName: string;
-  prompt: string;
-  paragraph: ExtractedParagraph;
-}) {
-  const { object } = await generateObject({
-    model: params.provider.chatModel(getTextLlmModel()),
-    schema: templateSlotExtractionResultSchema,
-    timeout: 60000,
-    prompt: [
-      EXTRACTION_SYSTEM_PROMPT,
-      `文件名：${params.fileName}`,
-      params.prompt ? `用户补充说明：${params.prompt}` : '用户补充说明：无',
-      `当前段落序号：${params.paragraph.paragraph_index}`,
-      `当前段落标题：${params.paragraph.paragraph_title}`,
-      '特别注意：如果用户要求抽取汽车牌照、汽车品牌、车型或其他默认字段范围之外的内容，只要它们真实出现在当前段落，也必须作为独立槽位输出。',
-      '如果当前段落里出现多个不同含义的日期、金额、百分数或利率，必须分别输出，保持原文顺序，不能遗漏任何一个。',
-      '以下是待抽取的当前段落，请严格按上面的 JSON 结构返回：',
-      params.paragraph.paragraph_text,
-    ].join('\n\n'),
-  });
-
-  const extractedParagraph = object.extraction_result[0];
-
-  if (!extractedParagraph) {
-    return null;
-  }
-
-  return {
-    paragraph_index: params.paragraph.paragraph_index,
-    paragraph_title:
-      extractedParagraph.paragraph_title?.trim() || params.paragraph.paragraph_title,
-    items: extractedParagraph.items.map((item) => ({
-      ...item,
-      paragraph_index: params.paragraph.paragraph_index,
-    })),
-  };
-}
-
 export async function extractTemplateSlotsFromDocx(params: {
   buffer: Buffer;
   prompt: string;
@@ -184,18 +294,16 @@ export async function extractTemplateSlotsFromDocx(params: {
   const uploadHtml = await extractHtmlFromDocxBuffer(params.buffer);
 
   if (!uploadText) {
-    throw new Error('DOCX 中没有提取到可用文本，请检查模板内容后重试。');
+    throw new Error('No usable text was extracted from the DOCX file.');
   }
 
   const paragraphs = extractParagraphsFromRawText(uploadText);
 
   if (paragraphs.length === 0) {
-    throw new Error('DOCX 中没有识别到可用段落，请检查模板内容后重试。');
+    throw new Error('No usable paragraphs were found in the DOCX file.');
   }
 
-  const provider = createTextLlmClient();
   const extractedParagraphs = await extractParagraphsInBatches({
-    provider,
     fileName: params.fileName,
     prompt: params.prompt,
     paragraphs,

@@ -54,9 +54,12 @@ const generationPdfFillResultSchema = z.object({
 });
 
 const PDF_SLOT_FILL_TEXT_TIMEOUT_MS = 90000;
-const PDF_SLOT_FILL_VISION_TIMEOUT_MS = 180000;
+const PDF_SLOT_FILL_VISION_TIMEOUT_MS = 240000;
 const MAX_TEXT_PAGES_PER_CHUNK = 2;
 const MAX_TEXT_CHARS_PER_CHUNK = 2200;
+const MAX_VISION_PAGES_PER_REQUEST = 1;
+const MAX_VISION_BATCH_CONCURRENCY = 6;
+const MAX_TEXT_SLOT_CONCURRENCY = 4;
 
 function normalizeJsonText(rawContent: string) {
   const trimmed = rawContent.trim();
@@ -101,7 +104,7 @@ function parseModelJson<T>(rawContent: string): T {
   } catch (error) {
     const preview = repaired.slice(0, 240);
     const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`模型返回的 JSON 解析失败：${reason}。片段：${preview}`);
+    throw new Error(`Model JSON parse failed: ${reason}. Snippet: ${preview}`);
   }
 }
 
@@ -110,7 +113,7 @@ function normalizeSlotIdentifier(value: string | null | undefined) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, '')
-    .replace(/[：:，,。、“”"'`（）()\[\]【】{}<>《》\-_/]/g, '');
+    .replace(/[，。,、“”"'`（）()\[\]【】{}<>《》\-_/]/g, '');
 }
 
 function findResultForSlot(
@@ -172,34 +175,24 @@ function resolveChatCompletionsUrl(baseUrl: string) {
   return `${normalizedBaseUrl}/chat/completions`;
 }
 
-function resolveResponsesUrl(baseUrl: string) {
-  const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
-
-  if (normalizedBaseUrl.endsWith('/responses')) {
-    return normalizedBaseUrl;
-  }
-
-  return `${normalizedBaseUrl}/responses`;
-}
-
 function getSlotSemanticHint(slotName: string) {
   if (slotName.includes('身份证')) {
-    return '目标字段是自然人的身份证号/身份证号码/公民身份号码/证件号码，通常是 15 到 18 位字符，可能以 X 结尾。';
+    return 'Target field is a Chinese identity card number or certificate number.';
   }
 
   if (slotName.includes('电话') || slotName.includes('手机') || slotName.includes('联系')) {
-    return '目标字段是联系电话/联系方式/手机号，通常是 11 位手机号，也可能带区号或分隔符。';
+    return 'Target field is a contact phone number or mobile number.';
   }
 
   if (slotName.includes('出生')) {
-    return '目标字段是出生日期/生日/生于，常见格式有 YYYY年M月D日、YYYY-M-D、YYYY/MM/DD。';
+    return 'Target field is a birth date.';
   }
 
   if (slotName.includes('住址') || slotName.includes('地址')) {
-    return '目标字段是住址/联系地址/通讯地址/住所地/户籍地址，通常是较长的中文地址串。';
+    return 'Target field is an address or residence.';
   }
 
-  return '请根据槽位名称的语义，在个人信息或合同主体信息中寻找最可能对应的值。';
+  return 'Find the value that best matches the meaning of this slot.';
 }
 
 function getSlotKeywords(slotName: string) {
@@ -278,7 +271,7 @@ function buildSlotContexts(slotName: string, pages: PdfPageInput[]) {
   };
 
   for (const page of orderedPages) {
-    const pageText = `[第 ${page.page_number} 页]\n${page.text}\n`;
+    const pageText = `[Page ${page.page_number}]\n${page.text}\n`;
 
     if (
       currentPages.length >= MAX_TEXT_PAGES_PER_CHUNK ||
@@ -293,24 +286,6 @@ function buildSlotContexts(slotName: string, pages: PdfPageInput[]) {
 
   flush();
   return contexts;
-}
-
-function extractVisionOutputText(payload: unknown) {
-  const candidate = payload as {
-    output_text?: unknown;
-    output?: Array<{ content?: Array<{ text?: unknown }> }>;
-  };
-
-  if (typeof candidate?.output_text === 'string' && candidate.output_text.trim()) {
-    return candidate.output_text;
-  }
-
-  const outputText = candidate?.output
-    ?.flatMap((item) => item?.content ?? [])
-    ?.map((item) => item?.text)
-    ?.find((value): value is string => typeof value === 'string' && Boolean(value.trim()));
-
-  return outputText ?? '';
 }
 
 async function extractSlotWithTextModel(input: {
@@ -332,13 +307,11 @@ async function extractSlotWithTextModel(input: {
       signal: controller.signal,
       body: JSON.stringify({
         model: getTextLlmModel(),
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
         messages: [
           {
             role: 'system',
             content:
-              '你是 PDF 槽位填充助手。只针对当前提供的单个槽位名称和 PDF 页面片段内容，找出这个槽位在片段中可能对应的值，并返回能定位的原文截取片段。只返回 JSON。',
+              'You are a PDF slot filling assistant. Extract only the current slot from the provided PDF text chunk. Return JSON only.',
           },
           {
             role: 'user',
@@ -346,8 +319,10 @@ async function extractSlotWithTextModel(input: {
               document_name: input.documentName,
               slot_key: input.slot.slot_key,
               slot_name: input.slot.field_category,
-              slot_hint: input.slot.meaning_to_applicant || getSlotSemanticHint(input.slot.field_category),
-              strict_requirement: 'Return the exact same slot_key in results[0].slot_key.',
+              slot_hint:
+                input.slot.meaning_to_applicant || getSlotSemanticHint(input.slot.field_category),
+              strict_requirement:
+                'Return the exact same slot_key in results[0].slot_key. final_value must be the exact value used for filling. matches[0].value must equal final_value. matches[0].snippet must contain final_value as a direct quote from the PDF text chunk.',
               page_numbers: input.pageNumbers,
               content: input.chunkText,
               output_schema: {
@@ -355,11 +330,11 @@ async function extractSlotWithTextModel(input: {
                   {
                     slot_key: input.slot.slot_key,
                     slot_name: input.slot.field_category,
-                    final_value: '最终确定的填充值',
+                    final_value: 'final extracted value',
                     matches: [
                       {
-                        value: '对应值',
-                        snippet: '包含对应值的原文片段',
+                        value: 'matched value',
+                        snippet: 'short supporting quote from the PDF text',
                         page_number: 1,
                       },
                     ],
@@ -374,7 +349,7 @@ async function extractSlotWithTextModel(input: {
 
     if (!upstream.ok) {
       const details = await upstream.text();
-      throw new Error(`文本模型请求失败（${upstream.status}）：${details}`);
+      throw new Error(`Text model request failed (${upstream.status}): ${details}`);
     }
 
     const payload = await upstream.json();
@@ -409,6 +384,8 @@ async function extractSlotWithTextModel(input: {
       };
     }
 
+    const extractedValue = resolveExtractedValue(firstResult, firstMatch);
+
     return {
       document_summary: '',
       extracted_items: [
@@ -416,8 +393,8 @@ async function extractSlotWithTextModel(input: {
           slot_key: input.slot.slot_key,
           field_category: input.slot.field_category,
           meaning_to_applicant: input.slot.meaning_to_applicant,
-          original_value: firstResult?.final_value?.trim() || firstMatch?.value?.trim() || '',
-          evidence: firstMatch?.snippet?.trim() || '',
+          original_value: extractedValue,
+          evidence: resolveEvidenceSnippet(extractedValue, firstMatch),
           evidence_page_numbers:
             typeof firstMatch?.page_number === 'number'
               ? [firstMatch.page_number]
@@ -429,7 +406,7 @@ async function extractSlotWithTextModel(input: {
     };
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error('文本槽位抽取超时，请稍后重试。');
+      throw new Error('Text slot extraction timed out.');
     }
 
     throw error;
@@ -448,17 +425,20 @@ async function extractSlotsWithVisionModel(input: {
 
   try {
     const content: Array<
-      | { type: 'input_image'; image_url: string }
-      | { type: 'input_text'; text: string }
+      | { type: 'image_url'; image_url: { url: string } }
+      | { type: 'text'; text: string }
     > = input.visionPages.map((page) => ({
-      type: 'input_image',
-      image_url: page.image_data_url,
+      type: 'image_url',
+      image_url: {
+        url: page.image_data_url,
+      },
     }));
 
     content.push({
-      type: 'input_text',
+      type: 'text',
       text: JSON.stringify({
-        task: '请逐页查看这些 PDF 页面图像，针对给定槽位列表穷尽式抽取对应值。每个槽位都要返回一个 final_value，以及所有能支撑该槽位的原文片段 matches。只返回 JSON。',
+        task:
+          'Review all provided PDF page images and extract slot values. Return JSON only. Every result item must include the exact slot_key copied from slot_definitions. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the page.',
         document_name: input.documentName,
         slot_names: input.slots.map((slot) => slot.field_category),
         slot_definitions: input.slots.map((slot) => ({
@@ -468,23 +448,16 @@ async function extractSlotsWithVisionModel(input: {
             slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
         })),
         page_numbers: input.visionPages.map((page) => page.page_number),
-        strict_requirement:
-          'Each result item must include the exact slot_key copied from slot_definitions.',
-        slot_hints: Object.fromEntries(
-          input.slots.map((slot) => [
-            slot.field_category,
-            slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
-          ]),
-        ),
         output_schema: {
           results: [
             {
-              slot_name: '槽位名称',
-              final_value: '最终确定的填充值',
+              slot_key: 'slot key from slot_definitions',
+              slot_name: 'slot name',
+              final_value: 'final extracted value',
               matches: [
                 {
-                  value: '对应值',
-                  snippet: '包含对应值的原文片段',
+                  value: 'matched value',
+                  snippet: 'short supporting quote from the PDF page',
                   page_number: 1,
                 },
               ],
@@ -494,7 +467,7 @@ async function extractSlotsWithVisionModel(input: {
       }),
     });
 
-    const upstream = await fetch(resolveResponsesUrl(getVisionLlmBaseUrl()), {
+    const upstream = await fetch(resolveChatCompletionsUrl(getVisionLlmBaseUrl()), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -503,7 +476,12 @@ async function extractSlotsWithVisionModel(input: {
       signal: controller.signal,
       body: JSON.stringify({
         model: getVisionLlmModel(),
-        input: [
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a PDF slot filling assistant. Read the provided PDF page images and return JSON only.',
+          },
           {
             role: 'user',
             content,
@@ -514,13 +492,13 @@ async function extractSlotsWithVisionModel(input: {
 
     if (!upstream.ok) {
       const details = await upstream.text();
-      throw new Error(`视觉模型请求失败（${upstream.status}）：${details}`);
+      throw new Error(`Vision model request failed (${upstream.status}): ${details}`);
     }
 
     const payload = await upstream.json();
-    const rawContent = extractVisionOutputText(payload);
+    const rawContent = payload?.choices?.[0]?.message?.content;
 
-    if (!rawContent) {
+    if (typeof rawContent !== 'string' || !rawContent.trim()) {
       return {
         document_summary: '',
         extracted_items: [],
@@ -545,13 +523,15 @@ async function extractSlotsWithVisionModel(input: {
         return [];
       }
 
+      const extractedValue = resolveExtractedValue(result, firstMatch);
+
       return [
         {
           slot_key: slot.slot_key,
           field_category: slot.field_category,
           meaning_to_applicant: slot.meaning_to_applicant,
-          original_value: result?.final_value?.trim() || firstMatch?.value?.trim() || '',
-          evidence: firstMatch?.snippet?.trim() || '',
+          original_value: extractedValue,
+          evidence: resolveEvidenceSnippet(extractedValue, firstMatch),
           evidence_page_numbers:
             result?.matches
               ?.map((match) => match?.page_number)
@@ -568,7 +548,7 @@ async function extractSlotsWithVisionModel(input: {
     };
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error('视觉模型处理超时了，请稍后重试。');
+      throw new Error('Vision model processing timed out.');
     }
 
     throw error;
@@ -577,7 +557,7 @@ async function extractSlotsWithVisionModel(input: {
   }
 }
 
-function mergeTextResults(
+function mergeSlotResults(
   slots: GenerationSlotSchemaItem[],
   results: z.infer<typeof generationPdfFillResultSchema>[],
 ) {
@@ -597,12 +577,84 @@ function mergeTextResults(
         meaning_to_applicant: slot.meaning_to_applicant,
         original_value: preferredMatch?.original_value ?? '',
         evidence: preferredMatch?.evidence ?? '',
-        evidence_page_numbers: preferredMatch?.evidence_page_numbers ?? [],
+        evidence_page_numbers: Array.from(
+          new Set(
+            results
+              .flatMap((result) =>
+                result.extracted_items.filter((item) => item.slot_key === slot.slot_key),
+              )
+              .flatMap((item) => item.evidence_page_numbers ?? []),
+          ),
+        ).sort((left, right) => left - right),
         notes: preferredMatch?.notes ?? '',
         confidence: preferredMatch?.confidence ?? null,
       };
     }),
   };
+}
+
+function buildVisionPageBatches(visionPages: PdfVisionPageInput[]) {
+  const batches: PdfVisionPageInput[][] = [];
+
+  for (let index = 0; index < visionPages.length; index += MAX_VISION_PAGES_PER_REQUEST) {
+    batches.push(visionPages.slice(index, index + MAX_VISION_PAGES_PER_REQUEST));
+  }
+
+  return batches;
+}
+
+function hasFilledValue(value: string | null | undefined) {
+  return Boolean(value?.trim());
+}
+
+function resolveExtractedValue(result: ModelResultCandidate | null, firstMatch?: ModelMatch) {
+  return result?.final_value?.trim() || firstMatch?.value?.trim() || '';
+}
+
+function resolveEvidenceSnippet(extractedValue: string, firstMatch?: ModelMatch) {
+  const snippet = firstMatch?.snippet?.trim() || '';
+
+  if (!snippet) {
+    return extractedValue;
+  }
+
+  if (extractedValue && !snippet.includes(extractedValue)) {
+    return extractedValue;
+  }
+
+  return snippet;
+}
+
+async function runWithConcurrency<TInput, TOutput>(params: {
+  items: TInput[];
+  concurrency: number;
+  worker: (item: TInput, index: number) => Promise<TOutput>;
+}) {
+  const { items, concurrency, worker } = params;
+
+  if (items.length === 0) {
+    return [] as TOutput[];
+  }
+
+  const results = new Array<TOutput>(items.length);
+  let nextIndex = 0;
+
+  async function consume() {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+
+      if (currentIndex >= items.length) {
+        return;
+      }
+
+      results[currentIndex] = await worker(items[currentIndex] as TInput, currentIndex);
+    }
+  }
+
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: workerCount }, () => consume()));
+  return results;
 }
 
 export async function fillTemplateSlotsFromPdf(params: {
@@ -636,29 +688,69 @@ export async function fillTemplateSlotsFromPdf(params: {
         params.totalTextLength <= Math.max(20, validPages.length * 10)));
 
   if (shouldUseVision) {
-    return extractSlotsWithVisionModel({
-      documentName: params.pdfFileName,
-      slots: params.slots,
-      visionPages: validVisionPages,
-    });
+    const visionPageBatches = buildVisionPageBatches(validVisionPages);
+    const visionResults: z.infer<typeof generationPdfFillResultSchema>[] = [];
+    const resolvedSlotKeys = new Set<string>();
+
+    for (
+      let batchStartIndex = 0;
+      batchStartIndex < visionPageBatches.length;
+      batchStartIndex += MAX_VISION_BATCH_CONCURRENCY
+    ) {
+      const remainingSlots = params.slots.filter((slot) => !resolvedSlotKeys.has(slot.slot_key));
+
+      if (remainingSlots.length === 0) {
+        break;
+      }
+
+      const currentWave = visionPageBatches.slice(
+        batchStartIndex,
+        batchStartIndex + MAX_VISION_BATCH_CONCURRENCY,
+      );
+
+      const currentWaveResults = await runWithConcurrency({
+        items: currentWave,
+        concurrency: MAX_VISION_BATCH_CONCURRENCY,
+        worker: async (visionPageBatch) =>
+          extractSlotsWithVisionModel({
+            documentName: params.pdfFileName,
+            slots: remainingSlots,
+            visionPages: visionPageBatch,
+          }),
+      });
+
+      visionResults.push(...currentWaveResults);
+
+      for (const result of currentWaveResults) {
+        for (const item of result.extracted_items) {
+          if (hasFilledValue(item.original_value)) {
+            resolvedSlotKeys.add(item.slot_key);
+          }
+        }
+      }
+    }
+
+    return mergeSlotResults(params.slots, visionResults);
   }
 
-  const allResults: z.infer<typeof generationPdfFillResultSchema>[] = [];
+  const textTasks = params.slots.flatMap((slot) =>
+    buildSlotContexts(slot.field_category, validPages).map((context) => ({
+      slot,
+      context,
+    })),
+  );
 
-  for (const slot of params.slots) {
-    const contexts = buildSlotContexts(slot.field_category, validPages);
-
-    for (const context of contexts) {
-      const result = await extractSlotWithTextModel({
+  const allResults = await runWithConcurrency({
+    items: textTasks,
+    concurrency: MAX_TEXT_SLOT_CONCURRENCY,
+    worker: async ({ slot, context }) =>
+      extractSlotWithTextModel({
         documentName: params.pdfFileName,
         slot,
         pageNumbers: context.pageNumbers,
         chunkText: context.chunkText,
-      });
+      }),
+  });
 
-      allResults.push(result);
-    }
-  }
-
-  return mergeTextResults(params.slots, allResults);
+  return mergeSlotResults(params.slots, allResults);
 }
