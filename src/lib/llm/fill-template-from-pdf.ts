@@ -69,6 +69,8 @@ const MAX_VISION_PAGES_PER_REQUEST = 4;
 const MAX_VISION_OCR_BATCH_CONCURRENCY = 2;
 const MAX_TEXT_SLOT_BATCH_CONCURRENCY = 2;
 const MAX_TEXT_SLOTS_PER_REQUEST = 10;
+const PROCESS_HARD_TIMEOUT_MS = 300000;
+const PROCESS_OCR_SLOT_FILL_RESERVE_MS = 60000;
 
 function normalizeJsonText(rawContent: string) {
   const trimmed = rawContent.trim();
@@ -700,6 +702,9 @@ async function extractTextFromVisionPages(input: {
   visionPages: PdfVisionPageInput[];
   batchIndex?: number;
   totalBatches?: number;
+  processStartedAtMs?: number;
+  processHardTimeoutMs?: number;
+  processReserveMs?: number;
   onTrace?: (trace: { message: string }) => Promise<void> | void;
 }) {
   for (let attempt = 1; attempt <= MAX_VISION_REQUEST_RETRIES; attempt += 1) {
@@ -720,26 +725,74 @@ async function extractTextFromVisionPages(input: {
       requestTimeoutMs,
     );
     let heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
+    let budgetAbortTriggered = false;
 
     try {
       const batchLabel =
         typeof input.batchIndex === 'number' && typeof input.totalBatches === 'number'
           ? `batch ${input.batchIndex + 1}/${input.totalBatches}`
           : 'batch';
+      const startingBudgetSnapshot = getProcessBudgetSnapshot({
+        processStartedAtMs: input.processStartedAtMs,
+        processHardTimeoutMs: input.processHardTimeoutMs,
+      });
+
+      if (
+        startingBudgetSnapshot &&
+        startingBudgetSnapshot.remainingBudgetMs <=
+          (input.processReserveMs ?? PROCESS_OCR_SLOT_FILL_RESERVE_MS)
+      ) {
+        throw new Error(
+          'Skipping OCR batch because remaining /process budget is too low; continuing to slot fill with OCR pages that already succeeded.',
+        );
+      }
       const batchStartedMessage =
         `[PDF Fill][OCR] Starting ${batchLabel} for ${input.documentName} ` +
         `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, pages: ${input.visionPages
           .map((page) => page.page_number)
           .join(',')}, timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}, page image sizes: ${pageSizeSummary
           .map((entry) => `${entry.pageNumber}=${formatBytes(entry.bytes)}`)
-          .join('; ')}).`;
+          .join('; ')}${formatProcessBudgetSuffix({
+            processStartedAtMs: input.processStartedAtMs,
+            processHardTimeoutMs: input.processHardTimeoutMs,
+          })}).`;
       console.info(batchStartedMessage);
       await input.onTrace?.({ message: batchStartedMessage });
       heartbeatIntervalId = setInterval(() => {
         const elapsedMs = Date.now() - batchStartedAt;
+        const budgetSnapshot = getProcessBudgetSnapshot({
+          processStartedAtMs: input.processStartedAtMs,
+          processHardTimeoutMs: input.processHardTimeoutMs,
+        });
+
+        if (
+          budgetSnapshot &&
+          !budgetAbortTriggered &&
+          budgetSnapshot.remainingBudgetMs <=
+            (input.processReserveMs ?? PROCESS_OCR_SLOT_FILL_RESERVE_MS)
+        ) {
+          budgetAbortTriggered = true;
+          const budgetAbortMessage =
+            `[PDF Fill][OCR] Aborting ${batchLabel} for ${input.documentName} early ` +
+            `to preserve ${formatElapsedMs(
+              input.processReserveMs ?? PROCESS_OCR_SLOT_FILL_RESERVE_MS,
+            )} for slot fill (process elapsed: ${formatElapsedMs(
+              budgetSnapshot.totalElapsedMs,
+            )}, remaining /process budget: ${formatElapsedMs(
+              budgetSnapshot.remainingBudgetMs,
+            )}).`;
+          console.warn(budgetAbortMessage);
+          void input.onTrace?.({ message: budgetAbortMessage });
+          controller.abort();
+          return;
+        }
+
         const heartbeatMessage =
           `[PDF Fill][OCR] Waiting on ${batchLabel} for ${input.documentName} ` +
-          `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}).`;
+          `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix({
+            processStartedAtMs: input.processStartedAtMs,
+            processHardTimeoutMs: input.processHardTimeoutMs,
+          })}).`;
         console.info(heartbeatMessage);
         void input.onTrace?.({ message: heartbeatMessage });
       }, 15000);
@@ -838,7 +891,10 @@ async function extractTextFromVisionPages(input: {
       const batchElapsedMs = Date.now() - batchStartedAt;
       const batchCompletedMessage =
         `[PDF Fill][OCR] Completed ${batchLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}) with ${ocrPages.length} OCR text pages in ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}).`;
+        `(attempt ${attempt}) with ${ocrPages.length} OCR text pages in ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix({
+          processStartedAtMs: input.processStartedAtMs,
+          processHardTimeoutMs: input.processHardTimeoutMs,
+        })}).`;
       console.info(batchCompletedMessage);
       await input.onTrace?.({ message: batchCompletedMessage });
       for (const page of ocrPages) {
@@ -868,11 +924,20 @@ async function extractTextFromVisionPages(input: {
       const batchElapsedMs = Date.now() - batchStartedAt;
       const batchFailedMessage =
         `[PDF Fill][OCR] Failed ${batchLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}) after ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}).`;
+        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}) after ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix({
+          processStartedAtMs: input.processStartedAtMs,
+          processHardTimeoutMs: input.processHardTimeoutMs,
+        })}).`;
       console.error(batchFailedMessage, normalizedError);
       await input.onTrace?.({ message: batchFailedMessage });
 
-      if (!shouldRetry) {
+      if (!shouldRetry || budgetAbortTriggered) {
+        if (budgetAbortTriggered) {
+          throw new Error(
+            'OCR batch stopped early because remaining /process budget was too low; continuing with successful OCR batches only.',
+          );
+        }
+
         if (normalizedError instanceof DOMException && normalizedError.name === 'AbortError') {
           throw new Error('Vision model processing timed out after multiple attempts.');
         }
@@ -1062,6 +1127,42 @@ function getErrorMessage(error: unknown) {
   }
 
   return String(error);
+}
+
+function getProcessBudgetSnapshot(input: {
+  processStartedAtMs?: number;
+  processHardTimeoutMs?: number;
+}) {
+  if (
+    typeof input.processStartedAtMs !== 'number' ||
+    typeof input.processHardTimeoutMs !== 'number'
+  ) {
+    return null;
+  }
+
+  const totalElapsedMs = Math.max(0, Date.now() - input.processStartedAtMs);
+  const remainingBudgetMs = Math.max(0, input.processHardTimeoutMs - totalElapsedMs);
+
+  return {
+    totalElapsedMs,
+    remainingBudgetMs,
+  };
+}
+
+function formatProcessBudgetSuffix(input: {
+  processStartedAtMs?: number;
+  processHardTimeoutMs?: number;
+}) {
+  const snapshot = getProcessBudgetSnapshot(input);
+
+  if (!snapshot) {
+    return '';
+  }
+
+  return (
+    `, process elapsed: ${formatElapsedMs(snapshot.totalElapsedMs)}, ` +
+    `remaining /process budget: ${formatElapsedMs(snapshot.remainingBudgetMs)}`
+  );
 }
 
 function chooseTextSlotFillStrategy(input: {
@@ -1503,6 +1604,8 @@ export async function fillTemplateSlotsFromPdf(params: {
   likelyScanned?: boolean;
   totalTextLength?: number;
   forceOcr?: boolean;
+  processStartedAtMs?: number;
+  processHardTimeoutMs?: number;
   onTrace?: (trace: { message: string }) => Promise<void> | void;
   onProgress?: (progress: { completedSlots: number; totalSlots: number }) => Promise<void> | void;
 }) {
@@ -1552,6 +1655,9 @@ export async function fillTemplateSlotsFromPdf(params: {
             visionPages: visionPageBatch,
             batchIndex,
             totalBatches: visionPageBatches.length,
+            processStartedAtMs: params.processStartedAtMs,
+            processHardTimeoutMs: params.processHardTimeoutMs ?? PROCESS_HARD_TIMEOUT_MS,
+            processReserveMs: PROCESS_OCR_SLOT_FILL_RESERVE_MS,
             onTrace: params.onTrace,
           }),
       });

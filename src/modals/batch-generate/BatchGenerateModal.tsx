@@ -533,6 +533,10 @@ export function BatchGenerateModal({
     );
   };
 
+  const logSubmissionStage = (stage: { title: string; description: string }) => {
+    console.info(`[Batch Generate][Stage] ${stage.title}：${stage.description}`);
+  };
+
   const handleSelectPdfFile = async (rowId: string, file: File | null) => {
     updateRow(rowId, {
       file,
@@ -574,10 +578,14 @@ export function BatchGenerateModal({
     }
 
     setIsPreparingFiles(true);
+    logSubmissionStage({
+      title: '正在准备文件',
+      description: '正在检查页码范围并准备批量任务输入。',
+    });
 
     try {
       const preparedFiles = await Promise.all(
-        rowsWithFiles.map(async (row) => {
+        rowsWithFiles.map(async (row, rowIndex) => {
           const file = row.file;
           const parsedPdf = row.parsedPdf;
           const rowSelectionState = rowSelectionStates.find((state) => state.rowId === row.id);
@@ -593,7 +601,17 @@ export function BatchGenerateModal({
               original_page_number: originalPageNumber,
             }),
           );
+          logSubmissionStage({
+            title: '正在生成 OCR 图片',
+            description:
+              `${file.name}：正在生成 OCR 图片（文件 ${rowIndex + 1}/${rowsWithFiles.length}，共 ${selectedOriginalPageNumbers.length} 页）。`,
+          });
           const ocrVisionPages = await renderPdfPagesForVision(file, selectedOriginalPageNumbers);
+          logSubmissionStage({
+            title: 'OCR 图片生成完成',
+            description:
+              `${file.name}：已生成 ${ocrVisionPages.length} 张 OCR 图片，准备上传到存储。`,
+          });
 
           const currentImages = window.clipcapOcrImages ?? [];
           const nextImages = currentImages.filter((entry) => entry.fileName !== file.name);
@@ -657,6 +675,7 @@ export function BatchGenerateModal({
         templateId: innerProps.templateId,
         templateName: innerProps.templateName,
         files: preparedFiles,
+        onStageChange: logSubmissionStage,
       });
 
       setTaskId(result.task.id);

@@ -22,6 +22,10 @@ export interface CreateGenerationTaskInput {
   templateId: string;
   templateName: string;
   files: CreateGenerationTaskFileInput[];
+  onStageChange?: (stage: {
+    title: string;
+    description: string;
+  }) => void;
 }
 
 function sanitizeStorageFileName(fileName: string) {
@@ -146,6 +150,11 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
 
   return Promise.all(
     input.files.map(async (item) => {
+      input.onStageChange?.({
+        title: '正在上传 PDF',
+        description: `正在上传 ${item.file.name} 的原始 PDF 到存储。`,
+      });
+
       const storagePath = `${user.id}/staged/${crypto.randomUUID()}-${sanitizeStorageFileName(item.file.name)}`;
       const { error: uploadError } = await supabase.storage
         .from('generation-pdfs')
@@ -157,6 +166,9 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
       if (uploadError) {
         throw new Error(`上传 PDF 到存储失败：${uploadError.message}`);
       }
+
+      let uploadedOcrImageCount = 0;
+      const totalOcrImageCount = item.ocrVisionPages.length;
 
       const ocrImageAssets = await Promise.all(
         item.ocrVisionPages.map(async (visionPage, index) => {
@@ -193,6 +205,13 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
             throw new Error(`上传 OCR 页图到存储失败：${ocrUploadError.message}`);
           }
 
+          uploadedOcrImageCount += 1;
+          input.onStageChange?.({
+            title: '正在上传 OCR 图片',
+            description:
+              `${item.file.name}：已上传 ${uploadedOcrImageCount}/${totalOcrImageCount} 张 OCR 图片。`,
+          });
+
           return {
             uploaded_page_number: uploadedPageNumber,
             original_page_number: originalPageNumber,
@@ -222,6 +241,10 @@ export function useCreateGenerationTask() {
       let uploadedFileMetadatas;
 
       try {
+        input.onStageChange?.({
+          title: '正在上传文件',
+          description: '正在上传 PDF 和 OCR 图片到存储，请稍候。',
+        });
         uploadedFileMetadatas = await uploadFilesToSupabase(input);
       } catch (error) {
         const errorMessage =
@@ -254,6 +277,11 @@ export function useCreateGenerationTask() {
       formData.append('templateId', input.templateId);
       formData.append('templateName', input.templateName);
       formData.append('fileMetadatas', JSON.stringify(uploadedFileMetadatas));
+
+      input.onStageChange?.({
+        title: '正在创建批量任务',
+        description: '文件已上传完成，正在向服务端创建批量任务。',
+      });
 
       const response = await fetch('/api/generation-tasks', {
         method: 'POST',

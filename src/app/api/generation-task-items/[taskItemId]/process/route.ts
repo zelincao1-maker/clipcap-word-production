@@ -11,6 +11,7 @@ import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
+const PROCESS_HARD_TIMEOUT_MS = maxDuration * 1000;
 
 function createUnauthorizedResponse() {
   return NextResponse.json(
@@ -264,6 +265,7 @@ async function runGenerationTaskItemProcess(params: {
 }) {
   const admin = createSupabaseAdminClient();
   const startedAt = new Date();
+  const processStartedAtMs = startedAt.getTime();
   const slotSchema = Array.isArray(params.item.llm_input?.slot_schema)
     ? params.item.llm_input.slot_schema
     : [];
@@ -379,6 +381,8 @@ async function runGenerationTaskItemProcess(params: {
           ? params.item.llm_input.total_text_length
           : 0,
       forceOcr: params.item.llm_input?.force_ocr === true,
+      processStartedAtMs,
+      processHardTimeoutMs: PROCESS_HARD_TIMEOUT_MS,
       onTrace: async ({ message }) => {
         await appendProcessingTrace(admin, params.item.id, message);
       },
