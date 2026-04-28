@@ -159,6 +159,13 @@ export function useProcessGenerationTaskItem() {
         throw new Error(errorMessage);
       }
 
+      console.info('[Generation Task Item] Process response', {
+        status: response.status,
+        statusText: response.statusText,
+        taskItemId,
+        data: payload.data,
+      });
+
       return payload.data;
     },
   });
