@@ -15,6 +15,9 @@ export async function renderPdfPagesForVisionOnServer(input: {
   pdfBytes: Uint8Array;
   originalPageNumbers: number[];
 }): Promise<PdfVisionPageInput[]> {
+  const pdfjsGlobal = globalThis as typeof globalThis & {
+    pdfjsWorker?: unknown;
+  };
   const canvasModule = await import('@napi-rs/canvas');
   const { DOMMatrix, ImageData, Path2D, createCanvas } = canvasModule;
 
@@ -28,6 +31,12 @@ export async function renderPdfPagesForVisionOnServer(input: {
 
   if (typeof globalThis.Path2D === 'undefined') {
     globalThis.Path2D = Path2D as typeof globalThis.Path2D;
+  }
+
+  if (typeof pdfjsGlobal.pdfjsWorker === 'undefined') {
+    const workerModulePath = 'pdfjs-dist/legacy/build/pdf.worker.mjs';
+    const workerModule = await import(workerModulePath);
+    pdfjsGlobal.pdfjsWorker = workerModule;
   }
 
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
