@@ -23,6 +23,71 @@ export interface CreateGenerationTaskInput {
   files: CreateGenerationTaskFileInput[];
 }
 
+async function reportClientError(input: {
+  eventType: string;
+  message: string;
+  route: string;
+  templateId?: string | null;
+  payload?: Record<string, unknown>;
+}) {
+  try {
+    await fetch('/api/client-logs', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        level: 'error',
+        eventType: input.eventType,
+        message: input.message,
+        route: input.route,
+        templateId: input.templateId ?? null,
+        payload: input.payload ?? {},
+      }),
+    });
+  } catch (error) {
+    console.error('[Client Log] Failed to report frontend error', {
+      eventType: input.eventType,
+      message: input.message,
+      error,
+    });
+  }
+}
+
+async function parseApiPayload<T>(
+  response: Response,
+): Promise<{
+  payload: T | null;
+  message: string | null;
+}> {
+  const contentType = response.headers.get('content-type') ?? '';
+  const rawText = await response.text();
+
+  if (!rawText) {
+    return { payload: null, message: null };
+  }
+
+  if (contentType.includes('application/json')) {
+    try {
+      const payload = JSON.parse(rawText) as T & { message?: string };
+      return {
+        payload,
+        message:
+          typeof payload === 'object' &&
+          payload !== null &&
+          'message' in payload &&
+          typeof payload.message === 'string'
+            ? payload.message
+            : null,
+      };
+    } catch {
+      return { payload: null, message: rawText };
+    }
+  }
+
+  return { payload: null, message: rawText };
+}
+
 export function useCreateGenerationTask() {
   return useMutation({
     mutationFn: async (input: CreateGenerationTaskInput) => {
@@ -54,13 +119,38 @@ export function useCreateGenerationTask() {
         body: formData,
       });
 
-      const payload = (await response.json()) as {
+      const { payload, message } = await parseApiPayload<{
         message?: string;
         data?: CreateGenerationTaskResponse;
-      };
+      }>(response);
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '创建批量生成任务失败，请稍后重试。');
+      if (!response.ok || !payload?.data) {
+        const errorMessage = message ?? '创建批量生成任务失败，请稍后重试。';
+        console.error('[Generation Task] Create failed', {
+          status: response.status,
+          statusText: response.statusText,
+          message: errorMessage,
+          templateId: input.templateId,
+          templateName: input.templateName,
+          fileCount: input.files.length,
+          fileNames: input.files.map((item) => item.file.name),
+        });
+
+        await reportClientError({
+          eventType: 'generation_task_create_failed_frontend',
+          message: errorMessage,
+          route: '/api/generation-tasks',
+          templateId: input.templateId,
+          payload: {
+            status: response.status,
+            statusText: response.statusText,
+            templateName: input.templateName,
+            fileCount: input.files.length,
+            fileNames: input.files.map((item) => item.file.name),
+          },
+        });
+
+        throw new Error(errorMessage);
       }
 
       return payload.data;
@@ -75,13 +165,13 @@ export function useDeleteGenerationTask() {
         method: 'DELETE',
       });
 
-      const payload = (await response.json()) as {
+      const { payload, message } = await parseApiPayload<{
         message?: string;
         data?: { id: string };
-      };
+      }>(response);
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '删除批量生成任务失败，请稍后重试。');
+      if (!response.ok || !payload?.data) {
+        throw new Error(message ?? '删除批量生成任务失败，请稍后重试。');
       }
 
       return payload.data;
@@ -96,13 +186,13 @@ export function useDeleteGenerationTaskItem() {
         method: 'DELETE',
       });
 
-      const payload = (await response.json()) as {
+      const { payload, message } = await parseApiPayload<{
         message?: string;
         data?: { id: string; task_id: string | null; already_deleted?: boolean };
-      };
+      }>(response);
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '删除任务项失败，请稍后重试。');
+      if (!response.ok || !payload?.data) {
+        throw new Error(message ?? '删除任务项失败，请稍后重试。');
       }
 
       return payload.data;
