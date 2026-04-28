@@ -4,6 +4,17 @@ import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 
 const OCR_RENDER_SCALE = 6.0;
 const OCR_IMAGE_FORMAT = 'image/png';
+const VENDORED_CANVAS_MODULE_URL = pathToFileURL(
+  path.join(
+    process.cwd(),
+    '.vendor',
+    'napi-rs-runtime',
+    'node_modules',
+    '@napi-rs',
+    'canvas',
+    'index.js',
+  ),
+).href;
 const PDFJS_CMAP_URL = `${pathToFileURL(
   path.join(process.cwd(), 'node_modules', 'pdfjs-dist', 'cmaps'),
 ).href}/`;
@@ -18,7 +29,7 @@ export async function renderPdfPagesForVisionOnServer(input: {
   const pdfjsGlobal = globalThis as typeof globalThis & {
     pdfjsWorker?: unknown;
   };
-  const canvasModule = await import('@napi-rs/canvas');
+  const canvasModule = await import(VENDORED_CANVAS_MODULE_URL);
   const { DOMMatrix, ImageData, Path2D, createCanvas } = canvasModule;
 
   if (typeof globalThis.DOMMatrix === 'undefined') {
