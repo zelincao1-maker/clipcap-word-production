@@ -34,8 +34,7 @@ export async function renderPdfPagesForVisionOnServer(input: {
   }
 
   if (typeof pdfjsGlobal.pdfjsWorker === 'undefined') {
-    const workerModulePath = 'pdfjs-dist/legacy/build/pdf.worker.mjs';
-    const workerModule = await import(workerModulePath);
+    const workerModule = await import('pdfjs-dist/legacy/build/pdf.worker.mjs');
     pdfjsGlobal.pdfjsWorker = workerModule;
   }
 
