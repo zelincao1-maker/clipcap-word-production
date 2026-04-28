@@ -1,22 +1,27 @@
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 
+const require = createRequire(import.meta.url);
 const OCR_RENDER_SCALE = 6.0;
 const OCR_IMAGE_FORMAT = 'image/png';
-const VENDORED_CANVAS_MODULE_URL = pathToFileURL(
+const VENDORED_CANVAS_MODULE_PATH = path.join(
+  process.cwd(),
+  'vendor-runtime',
+  'napi-rs-runtime',
+  'node_modules',
+  '@napi-rs',
+  'canvas',
+  'index.js',
+);
+const PDFJS_CMAP_URL = `${pathToFileURL(
   path.join(
     process.cwd(),
-    '.vendor',
-    'napi-rs-runtime',
     'node_modules',
-    '@napi-rs',
-    'canvas',
-    'index.js',
+    'pdfjs-dist',
+    'cmaps',
   ),
-).href;
-const PDFJS_CMAP_URL = `${pathToFileURL(
-  path.join(process.cwd(), 'node_modules', 'pdfjs-dist', 'cmaps'),
 ).href}/`;
 const PDFJS_STANDARD_FONT_DATA_URL = `${pathToFileURL(
   path.join(process.cwd(), 'node_modules', 'pdfjs-dist', 'standard_fonts'),
@@ -29,7 +34,7 @@ export async function renderPdfPagesForVisionOnServer(input: {
   const pdfjsGlobal = globalThis as typeof globalThis & {
     pdfjsWorker?: unknown;
   };
-  const canvasModule = await import(VENDORED_CANVAS_MODULE_URL);
+  const canvasModule = require(VENDORED_CANVAS_MODULE_PATH) as typeof import('@napi-rs/canvas');
   const { DOMMatrix, ImageData, Path2D, createCanvas } = canvasModule;
 
   if (typeof globalThis.DOMMatrix === 'undefined') {

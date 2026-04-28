@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 const projectRoot = process.cwd();
-const vendorRoot = path.join(projectRoot, '.vendor', 'napi-rs-runtime');
+const vendorRoot = path.join(projectRoot, 'vendor-runtime', 'napi-rs-runtime');
 const vendorScopeRoot = path.join(vendorRoot, 'node_modules', '@napi-rs');
 
 async function copyPackage(packageName) {

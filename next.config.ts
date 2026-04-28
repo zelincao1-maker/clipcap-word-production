@@ -7,7 +7,7 @@ const workspaceRoot = path.dirname(fileURLToPath(import.meta.url));
 const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     '/*': [
-      './.vendor/napi-rs-runtime/**/*',
+      './vendor-runtime/napi-rs-runtime/**/*',
     ],
   },
   turbopack: {
