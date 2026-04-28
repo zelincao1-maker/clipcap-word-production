@@ -20,7 +20,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationTaskItemSummary } from '@/src/app/api/types/generation-task';
 import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
-import { parsePdf } from '@/src/lib/pdf/client-pdf';
+import { parsePdf, renderPdfPagesForVision } from '@/src/lib/pdf/client-pdf';
 import {
   useGenerationTask,
   useProcessGenerationTaskItem,
@@ -587,16 +587,62 @@ export function BatchGenerateModal({
           }
 
           const selectedOriginalPageNumbers = rowSelectionState.selectedPageNumbers;
-          const selectedPageSet = new Set(selectedOriginalPageNumbers);
           const uploadedPageNumberMapping = selectedOriginalPageNumbers.map(
             (originalPageNumber, index) => ({
               uploaded_page_number: index + 1,
               original_page_number: originalPageNumber,
             }),
           );
+          const ocrVisionPages = await renderPdfPagesForVision(file, selectedOriginalPageNumbers);
+
+          const currentImages = window.clipcapOcrImages ?? [];
+          const nextImages = currentImages.filter((entry) => entry.fileName !== file.name);
+
+          ocrVisionPages.forEach((visionPage, index) => {
+            const uploadedPageNumber = uploadedPageNumberMapping[index]?.uploaded_page_number ?? index + 1;
+            const originalPageNumber =
+              uploadedPageNumberMapping[index]?.original_page_number ?? visionPage.pageNumber;
+            const previewUrl = dataUrlToObjectUrl(visionPage.imageDataUrl);
+
+            nextImages.push({
+              fileName: file.name,
+              originalPageNumber,
+              uploadedPageNumber,
+              previewUrl,
+              imageDataUrl: visionPage.imageDataUrl,
+            });
+          });
+
+          window.clipcapOcrImages = nextImages.sort((left, right) => {
+            if (left.fileName === right.fileName) {
+              return left.uploadedPageNumber - right.uploadedPageNumber;
+            }
+
+            return left.fileName.localeCompare(right.fileName);
+          });
+
+          console.info(
+            `[Batch Generate][${file.name}] OCR images prepared: ${ocrVisionPages.length} page(s). Use window.clipcapOcrImages in the browser console, or run window.open(window.clipcapOcrImages[0].previewUrl).`,
+          );
+          ocrVisionPages.forEach((visionPage, index) => {
+            const uploadedPageNumber = uploadedPageNumberMapping[index]?.uploaded_page_number ?? index + 1;
+            const originalPageNumber =
+              uploadedPageNumberMapping[index]?.original_page_number ?? visionPage.pageNumber;
+            const previewUrl =
+              window.clipcapOcrImages?.find(
+                (entry) =>
+                  entry.fileName === file.name &&
+                  entry.uploadedPageNumber === uploadedPageNumber,
+              )?.previewUrl ?? '';
+
+            console.info(
+              `[Batch Generate][${file.name}][OCR Image] uploaded page ${uploadedPageNumber}, original PDF page ${originalPageNumber}: ${previewUrl}`,
+            );
+          });
 
           return {
             file,
+            ocrVisionPages,
             selectedOriginalPageNumbers,
             uploadedPageNumberMapping,
             originalTotalPages: parsedPdf.pages.length,

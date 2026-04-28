@@ -15,6 +15,11 @@ interface UploadedFileMetadata {
   file_name?: string;
   storage_path?: string;
   force_ocr?: boolean;
+  ocr_image_assets?: Array<{
+    uploaded_page_number?: number;
+    original_page_number?: number;
+    storage_path?: string;
+  }>;
   parsed_pdf?: {
     pages?: Array<{ pageNumber?: number; text?: string }>;
     totalTextLength?: number;
@@ -29,6 +34,34 @@ interface UploadedFileMetadata {
   original_total_pages?: number;
   selected_page_count?: number;
   selected_page_range_label?: string;
+}
+
+function normalizeOcrImageAssets(metadata: UploadedFileMetadata | undefined) {
+  const assets = metadata?.ocr_image_assets;
+
+  if (!Array.isArray(assets)) {
+    return [];
+  }
+
+  return assets
+    .filter(
+      (
+        entry,
+      ): entry is {
+        uploaded_page_number: number;
+        original_page_number: number;
+        storage_path: string;
+      } =>
+        typeof entry?.uploaded_page_number === 'number' &&
+        Number.isInteger(entry.uploaded_page_number) &&
+        entry.uploaded_page_number > 0 &&
+        typeof entry?.original_page_number === 'number' &&
+        Number.isInteger(entry.original_page_number) &&
+        entry.original_page_number > 0 &&
+        typeof entry?.storage_path === 'string' &&
+        entry.storage_path.trim().length > 0,
+    )
+    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
 }
 
 function createUnauthorizedResponse() {
@@ -433,6 +466,7 @@ export async function POST(request: Request) {
               ? metadata.parsed_pdf.totalTextLength
               : 0,
           force_ocr: metadata?.force_ocr === true,
+          ocr_image_assets: normalizeOcrImageAssets(metadata),
           selected_original_page_numbers: normalizeSelectedOriginalPageNumbers(metadata),
           uploaded_page_number_mapping: normalizeUploadedPageNumberMapping(metadata),
           original_total_pages:

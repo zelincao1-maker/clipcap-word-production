@@ -24,6 +24,12 @@ function createUnauthorizedResponse() {
 
 type AdminClient = ReturnType<typeof createSupabaseAdminClient>;
 
+type OcrImageAsset = {
+  uploaded_page_number: number;
+  original_page_number: number;
+  storage_path: string;
+};
+
 type GenerationTaskItemRecord = {
   id: string;
   task_id: string;
@@ -46,12 +52,17 @@ type GenerationTaskItemRecord = {
     slot_schema?: GenerationSlotSchemaItem[];
     pages?: PdfPageInput[];
     vision_pages?: PdfVisionPageInput[];
+    ocr_image_assets?: OcrImageAsset[];
     likely_scanned?: boolean;
     total_text_length?: number;
     force_ocr?: boolean;
     selected_original_page_numbers?: number[];
   } | null;
 };
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : '处理任务时发生未知错误。';
+}
 
 function buildFallbackReviewPayload(slotSchema: GenerationSlotSchemaItem[]) {
   return {
@@ -112,33 +123,73 @@ function normalizeSelectedOriginalPageNumbers(value: unknown) {
   );
 }
 
-async function buildVisionPagesForTaskItem(params: {
-  admin: AdminClient;
-  item: GenerationTaskItemRecord;
-}) {
-  const { renderPdfPagesForVisionOnServer } = await import('@/src/lib/pdf/server-pdf');
-  const originalPageNumbers = normalizeSelectedOriginalPageNumbers(
-    params.item.llm_input?.selected_original_page_numbers,
-  );
-
-  if (originalPageNumbers.length === 0) {
+function normalizeOcrImageAssets(value: unknown): OcrImageAsset[] {
+  if (!Array.isArray(value)) {
     return [];
   }
 
-  const { data: fileBlob, error } = await params.admin.storage
-    .from('generation-pdfs')
-    .download(params.item.source_pdf_path);
+  return value
+    .filter(
+      (entry): entry is OcrImageAsset =>
+        !!entry &&
+        typeof entry === 'object' &&
+        typeof entry.uploaded_page_number === 'number' &&
+        Number.isInteger(entry.uploaded_page_number) &&
+        entry.uploaded_page_number > 0 &&
+        typeof entry.original_page_number === 'number' &&
+        Number.isInteger(entry.original_page_number) &&
+        entry.original_page_number > 0 &&
+        typeof entry.storage_path === 'string' &&
+        entry.storage_path.trim().length > 0,
+    )
+    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
+}
 
-  if (error || !fileBlob) {
-    throw error ?? new Error('Unable to download the original PDF for OCR.');
+function getMimeTypeFromStoragePath(storagePath: string) {
+  const normalized = storagePath.toLowerCase();
+
+  if (normalized.endsWith('.png')) {
+    return 'image/png';
   }
 
-  const arrayBuffer = await fileBlob.arrayBuffer();
+  if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
+    return 'image/jpeg';
+  }
 
-  return renderPdfPagesForVisionOnServer({
-    pdfBytes: new Uint8Array(arrayBuffer),
-    originalPageNumbers,
-  });
+  if (normalized.endsWith('.webp')) {
+    return 'image/webp';
+  }
+
+  return 'application/octet-stream';
+}
+
+async function loadVisionPagesFromStoredAssets(params: {
+  admin: AdminClient;
+  ocrImageAssets: OcrImageAsset[];
+}) {
+  if (params.ocrImageAssets.length === 0) {
+    return [];
+  }
+
+  return Promise.all(
+    params.ocrImageAssets.map(async (asset) => {
+      const { data: fileBlob, error } = await params.admin.storage
+        .from('generation-pdfs')
+        .download(asset.storage_path);
+
+      if (error || !fileBlob) {
+        throw error ?? new Error(`无法下载 OCR 页图：${asset.storage_path}`);
+      }
+
+      const buffer = Buffer.from(await fileBlob.arrayBuffer());
+      const mimeType = fileBlob.type || getMimeTypeFromStoragePath(asset.storage_path);
+
+      return {
+        page_number: asset.uploaded_page_number,
+        image_data_url: `data:${mimeType};base64,${buffer.toString('base64')}`,
+      } satisfies PdfVisionPageInput;
+    }),
+  );
 }
 
 async function recalculateTaskSummary(admin: AdminClient, taskId: string) {
@@ -192,11 +243,7 @@ async function updateSlotProgress(
     .eq('id', taskItemId);
 }
 
-async function appendProcessingTrace(
-  admin: AdminClient,
-  taskItemId: string,
-  message: string,
-) {
+async function appendProcessingTrace(admin: AdminClient, taskItemId: string, message: string) {
   try {
     const { error } = await admin.rpc('append_generation_task_item_processing_trace', {
       p_task_item_id: taskItemId,
@@ -218,10 +265,11 @@ async function runGenerationTaskItemProcess(params: {
   const admin = createSupabaseAdminClient();
   const startedAt = new Date();
   const slotSchema = Array.isArray(params.item.llm_input?.slot_schema)
-    ? params.item.llm_input?.slot_schema
+    ? params.item.llm_input.slot_schema
     : [];
   const pages = normalizePages(params.item.llm_input?.pages);
   const precomputedVisionPages = normalizeVisionPages(params.item.llm_input?.vision_pages);
+  const ocrImageAssets = normalizeOcrImageAssets(params.item.llm_input?.ocr_image_assets);
   const selectedOriginalPageNumbers = normalizeSelectedOriginalPageNumbers(
     params.item.llm_input?.selected_original_page_numbers,
   );
@@ -234,9 +282,10 @@ async function runGenerationTaskItemProcess(params: {
     if (
       pages.length === 0 &&
       precomputedVisionPages.length === 0 &&
+      ocrImageAssets.length === 0 &&
       selectedOriginalPageNumbers.length === 0
     ) {
-      throw new Error('?????????? PDF ??????????????????');
+      throw new Error('当前任务缺少可处理的 PDF 页码范围，请重新创建批量任务后再试。');
     }
 
     await admin
@@ -280,6 +329,7 @@ async function runGenerationTaskItemProcess(params: {
         slotCount: slotSchema.length,
         pageCount: pages.length,
         visionPageCount: precomputedVisionPages.length,
+        ocrImageAssetCount: ocrImageAssets.length,
         likelyScanned: params.item.llm_input?.likely_scanned === true,
         forceOcr: params.item.llm_input?.force_ocr === true,
       },
@@ -288,16 +338,18 @@ async function runGenerationTaskItemProcess(params: {
     const visionPages =
       precomputedVisionPages.length > 0
         ? precomputedVisionPages
-        : await buildVisionPagesForTaskItem({
+        : await loadVisionPagesFromStoredAssets({
             admin,
-            item: params.item,
+            ocrImageAssets,
           });
 
-    await appendProcessingTrace(
-      admin,
-      params.item.id,
-      `已在后台准备 OCR 页图 ${visionPages.length} 页。`,
-    );
+    if (visionPages.length > 0) {
+      await appendProcessingTrace(
+        admin,
+        params.item.id,
+        `已在后台读取 OCR 页图 ${visionPages.length} 页。`,
+      );
+    }
 
     let lastLoggedCompletedSlots = -1;
 
@@ -323,12 +375,11 @@ async function runGenerationTaskItemProcess(params: {
           totalSlots,
         });
 
-        const shouldLogProgress =
+        if (
           completedSlots === totalSlots ||
           completedSlots === 0 ||
-          completedSlots !== lastLoggedCompletedSlots;
-
-        if (shouldLogProgress) {
+          completedSlots !== lastLoggedCompletedSlots
+        ) {
           lastLoggedCompletedSlots = completedSlots;
 
           await appendProcessingTrace(
@@ -425,7 +476,7 @@ async function runGenerationTaskItemProcess(params: {
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `模型自动回填失败，已转为人工核查：${error instanceof Error ? error.message : '未知错误'}`,
+      `模型自动回填失败，已转为人工核查：${getErrorMessage(error)}`,
     );
 
     await recalculateTaskSummary(admin, params.item.task_id);
@@ -435,7 +486,7 @@ async function runGenerationTaskItemProcess(params: {
       actorEmail: params.actorEmail,
       level: 'error',
       eventType: 'generation_task_item_failed',
-      message: error instanceof Error ? error.message : 'Failed to process generation task item.',
+      message: getErrorMessage(error),
       route: '/api/generation-task-items/[taskItemId]/process',
       templateId: params.item.template_id,
       taskId: params.item.task_id,
@@ -445,6 +496,7 @@ async function runGenerationTaskItemProcess(params: {
         slotCount: slotSchema.length,
         pageCount: pages.length,
         visionPageCount: precomputedVisionPages.length,
+        ocrImageAssetCount: ocrImageAssets.length,
         likelyScanned: params.item.llm_input?.likely_scanned === true,
       }),
     });
@@ -553,8 +605,7 @@ export async function POST(
     );
   } catch (error) {
     const { taskItemId } = await context.params;
-    const message =
-      error instanceof Error ? error.message : 'PDF ?????????????';
+    const message = getErrorMessage(error);
 
     await logEvent({
       ownerId: user.id,

@@ -2,10 +2,12 @@
 
 import { useMutation } from '@tanstack/react-query';
 import type { CreateGenerationTaskResponse } from '@/src/app/api/types/generation-task';
+import type { PdfVisionPageInput } from '@/src/lib/pdf/client-pdf';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 
 export interface CreateGenerationTaskFileInput {
   file: File;
+  ocrVisionPages: PdfVisionPageInput[];
   selectedOriginalPageNumbers: number[];
   uploadedPageNumberMapping: Array<{
     uploaded_page_number: number;
@@ -38,6 +40,32 @@ function sanitizeStorageFileName(fileName: string) {
   const safeExtension = extension === '.pdf' ? extension : '.pdf';
 
   return `${safeBaseName}${safeExtension}`;
+}
+
+function getImageExtensionFromDataUrl(dataUrl: string) {
+  if (dataUrl.startsWith('data:image/png')) {
+    return 'png';
+  }
+
+  if (dataUrl.startsWith('data:image/jpeg')) {
+    return 'jpg';
+  }
+
+  if (dataUrl.startsWith('data:image/webp')) {
+    return 'webp';
+  }
+
+  return 'img';
+}
+
+async function dataUrlToBlob(dataUrl: string) {
+  const response = await fetch(dataUrl);
+
+  if (!response.ok) {
+    throw new Error('OCR 图片数据无效，无法上传到存储。');
+  }
+
+  return response.blob();
 }
 
 async function reportClientError(input: {
@@ -130,9 +158,41 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
         throw new Error(`上传 PDF 到存储失败：${uploadError.message}`);
       }
 
+      const ocrImageAssets = await Promise.all(
+        item.ocrVisionPages.map(async (visionPage, index) => {
+          const imageBlob = await dataUrlToBlob(visionPage.imageDataUrl);
+          const uploadedPageNumber =
+            item.uploadedPageNumberMapping[index]?.uploaded_page_number ?? index + 1;
+          const originalPageNumber =
+            item.uploadedPageNumberMapping[index]?.original_page_number ?? visionPage.pageNumber;
+          const extension = getImageExtensionFromDataUrl(visionPage.imageDataUrl);
+          const ocrImageStoragePath =
+            `${user.id}/staged-ocr/${crypto.randomUUID()}-` +
+            `${sanitizeStorageFileName(item.file.name).replace(/\.pdf$/i, '')}` +
+            `-page-${uploadedPageNumber}.${extension}`;
+          const { error: ocrUploadError } = await supabase.storage
+            .from('generation-pdfs')
+            .upload(ocrImageStoragePath, imageBlob, {
+              contentType: imageBlob.type || 'application/octet-stream',
+              upsert: false,
+            });
+
+          if (ocrUploadError) {
+            throw new Error(`上传 OCR 页图到存储失败：${ocrUploadError.message}`);
+          }
+
+          return {
+            uploaded_page_number: uploadedPageNumber,
+            original_page_number: originalPageNumber,
+            storage_path: ocrImageStoragePath,
+          };
+        }),
+      );
+
       return {
         file_name: item.file.name,
         storage_path: storagePath,
+        ocr_image_assets: ocrImageAssets,
         selected_original_page_numbers: item.selectedOriginalPageNumbers,
         uploaded_page_number_mapping: item.uploadedPageNumberMapping,
         original_total_pages: item.originalTotalPages,

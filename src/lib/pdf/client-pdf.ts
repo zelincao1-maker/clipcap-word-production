@@ -18,8 +18,8 @@ export interface PdfVisionPageInput {
   imageDataUrl: string;
 }
 
-const OCR_RENDER_SCALE = 2.0;
-const OCR_IMAGE_FORMAT = 'image/jpeg';
+const OCR_RENDER_SCALE = 6.0;
+const OCR_IMAGE_FORMAT = 'image/png';
 const OCR_IMAGE_JPEG_QUALITY = 0.92;
 
 const PDFJS_VERSION = '5.6.205';
@@ -127,9 +127,9 @@ export async function renderPdfPagesForVision(
     results.push({
       pageNumber,
       imageDataUrl:
-        OCR_IMAGE_FORMAT === 'image/jpeg'
-          ? canvas.toDataURL(OCR_IMAGE_FORMAT, OCR_IMAGE_JPEG_QUALITY)
-          : canvas.toDataURL(OCR_IMAGE_FORMAT),
+        OCR_IMAGE_FORMAT === 'image/png'
+          ? canvas.toDataURL(OCR_IMAGE_FORMAT)
+          : canvas.toDataURL(OCR_IMAGE_FORMAT, OCR_IMAGE_JPEG_QUALITY),
     });
   }
 
