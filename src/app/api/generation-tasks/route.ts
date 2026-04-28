@@ -13,6 +13,7 @@ import type { SlotReviewSessionPayload } from '@/src/lib/templates/slot-review-s
 
 interface UploadedFileMetadata {
   file_name?: string;
+  storage_path?: string;
   force_ocr?: boolean;
   parsed_pdf?: {
     pages?: Array<{ pageNumber?: number; text?: string }>;
@@ -280,7 +281,7 @@ export async function POST(request: Request) {
       );
     }
 
-    if (files.length === 0) {
+    if (files.length === 0 && fileMetadatas.length === 0) {
       return NextResponse.json(
         {
           code: 'PDF_REQUIRED',
@@ -300,7 +301,7 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!Array.isArray(fileMetadatas) || fileMetadatas.length !== files.length) {
+    if (!Array.isArray(fileMetadatas) || fileMetadatas.length === 0) {
       return NextResponse.json(
         {
           code: 'FILE_METADATA_REQUIRED',
@@ -322,6 +323,19 @@ export async function POST(request: Request) {
       );
     }
 
+    if (
+      files.length > 0 &&
+      fileMetadatas.length !== files.length
+    ) {
+      return NextResponse.json(
+        {
+          code: 'FILE_METADATA_REQUIRED',
+          message: '上传文件数量与元数据数量不一致，请重新上传后再试。',
+        },
+        { status: 400 },
+      );
+    }
+
     const admin = createSupabaseAdminClient();
     const slotReviewPayload =
       (template.slot_review_payload as SlotReviewSessionPayload | null | undefined) ?? null;
@@ -332,7 +346,7 @@ export async function POST(request: Request) {
       template_id: templateId,
       template_name_snapshot: template.template_name ?? fallbackTemplateName ?? '未命名模板',
       status: 'pending',
-      total_items: files.length,
+      total_items: fileMetadatas.length,
       succeeded_items: 0,
       failed_items: 0,
     };
@@ -351,27 +365,48 @@ export async function POST(request: Request) {
 
     const itemInsertPayloads = [];
 
-    for (const [index, file] of files.entries()) {
-      const metadata = fileMetadatas[index];
+    for (const [index, metadata] of fileMetadatas.entries()) {
+      const file = files[index] ?? null;
       const itemId = crypto.randomUUID();
-      const storagePath = `${user.id}/${task.id}/${itemId}-${sanitizeFileName(file.name)}`;
+      const preUploadedStoragePath =
+        typeof metadata?.storage_path === 'string' ? metadata.storage_path.trim() : '';
+      const storagePath =
+        preUploadedStoragePath ||
+        (file ? `${user.id}/${task.id}/${itemId}-${sanitizeFileName(file.name)}` : '');
 
-      const { error: uploadError } = await admin.storage.from('generation-pdfs').upload(storagePath, file, {
-        contentType: 'application/pdf',
-        upsert: false,
-      });
-
-      if (uploadError) {
+      if (!storagePath) {
         await admin
           .from('generation_tasks')
           .update({
             status: 'failed',
-            failed_items: files.length,
+            failed_items: fileMetadatas.length,
             finished_at: new Date().toISOString(),
           })
           .eq('id', task.id);
 
-        throw uploadError;
+        throw new Error(`第 ${index + 1} 个 PDF 缺少存储路径。`);
+      }
+
+      if (!preUploadedStoragePath) {
+        const { error: uploadError } = await admin.storage
+          .from('generation-pdfs')
+          .upload(storagePath, file as File, {
+            contentType: 'application/pdf',
+            upsert: false,
+          });
+
+        if (uploadError) {
+          await admin
+            .from('generation_tasks')
+            .update({
+              status: 'failed',
+              failed_items: fileMetadatas.length,
+              finished_at: new Date().toISOString(),
+            })
+            .eq('id', task.id);
+
+          throw uploadError;
+        }
       }
 
       itemInsertPayloads.push({
@@ -379,7 +414,7 @@ export async function POST(request: Request) {
         task_id: task.id,
         owner_id: user.id,
         template_id: templateId,
-        source_pdf_name: file.name,
+        source_pdf_name: metadata?.file_name ?? file?.name ?? `PDF-${index + 1}.pdf`,
         source_pdf_path: storagePath,
         status: 'uploaded',
         elapsed_seconds: 0,
@@ -428,7 +463,7 @@ export async function POST(request: Request) {
         .from('generation_tasks')
         .update({
           status: 'failed',
-          failed_items: files.length,
+          failed_items: fileMetadatas.length,
           finished_at: new Date().toISOString(),
         })
         .eq('id', task.id);
@@ -447,8 +482,8 @@ export async function POST(request: Request) {
       taskId: task.id,
       payload: {
         templateName: task.template_name_snapshot,
-        fileCount: files.length,
-        sourcePdfNames: files.map((file) => file.name),
+        fileCount: fileMetadatas.length,
+        sourcePdfNames: fileMetadatas.map((metadata, index) => metadata.file_name ?? files[index]?.name ?? `PDF-${index + 1}.pdf`),
       },
     });
 

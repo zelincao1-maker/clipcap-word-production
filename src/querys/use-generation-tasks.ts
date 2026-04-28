@@ -2,6 +2,7 @@
 
 import { useMutation } from '@tanstack/react-query';
 import type { CreateGenerationTaskResponse } from '@/src/app/api/types/generation-task';
+import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 
 export interface CreateGenerationTaskFileInput {
   file: File;
@@ -19,6 +20,24 @@ export interface CreateGenerationTaskInput {
   templateId: string;
   templateName: string;
   files: CreateGenerationTaskFileInput[];
+}
+
+function sanitizeStorageFileName(fileName: string) {
+  const lastDotIndex = fileName.lastIndexOf('.');
+  const extension = lastDotIndex >= 0 ? fileName.slice(lastDotIndex).toLowerCase() : '';
+  const baseName = lastDotIndex >= 0 ? fileName.slice(0, lastDotIndex) : fileName;
+
+  const normalizedBaseName = baseName
+    .normalize('NFKD')
+    .replace(/[^\x00-\x7F]/g, '_')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  const safeBaseName = normalizedBaseName || 'file';
+  const safeExtension = extension === '.pdf' ? extension : '.pdf';
+
+  return `${safeBaseName}${safeExtension}`;
 }
 
 async function reportClientError(input: {
@@ -86,30 +105,53 @@ async function parseApiPayload<T>(
   return { payload: null, message: rawText };
 }
 
+async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
+  const supabase = getSupabaseBrowserClient();
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    throw new Error('请先登录后再上传 PDF。');
+  }
+
+  return Promise.all(
+    input.files.map(async (item) => {
+      const storagePath = `${user.id}/staged/${crypto.randomUUID()}-${sanitizeStorageFileName(item.file.name)}`;
+      const { error: uploadError } = await supabase.storage
+        .from('generation-pdfs')
+        .upload(storagePath, item.file, {
+          contentType: 'application/pdf',
+          upsert: false,
+        });
+
+      if (uploadError) {
+        throw new Error(`上传 PDF 到存储失败：${uploadError.message}`);
+      }
+
+      return {
+        file_name: item.file.name,
+        storage_path: storagePath,
+        selected_original_page_numbers: item.selectedOriginalPageNumbers,
+        uploaded_page_number_mapping: item.uploadedPageNumberMapping,
+        original_total_pages: item.originalTotalPages,
+        selected_page_count: item.selectedOriginalPageNumbers.length,
+        selected_page_range_label: item.selectedPageRangeLabel,
+        force_ocr: item.forceOcr,
+      };
+    }),
+  );
+}
+
 export function useCreateGenerationTask() {
   return useMutation({
     mutationFn: async (input: CreateGenerationTaskInput) => {
+      const uploadedFileMetadatas = await uploadFilesToSupabase(input);
       const formData = new FormData();
       formData.append('templateId', input.templateId);
       formData.append('templateName', input.templateName);
-      formData.append(
-        'fileMetadatas',
-        JSON.stringify(
-          input.files.map((item) => ({
-            file_name: item.file.name,
-            selected_original_page_numbers: item.selectedOriginalPageNumbers,
-            uploaded_page_number_mapping: item.uploadedPageNumberMapping,
-            original_total_pages: item.originalTotalPages,
-            selected_page_count: item.selectedOriginalPageNumbers.length,
-            selected_page_range_label: item.selectedPageRangeLabel,
-            force_ocr: item.forceOcr,
-          })),
-        ),
-      );
-
-      input.files.forEach((item) => {
-        formData.append('files', item.file);
-      });
+      formData.append('fileMetadatas', JSON.stringify(uploadedFileMetadatas));
 
       const response = await fetch('/api/generation-tasks', {
         method: 'POST',
