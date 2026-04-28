@@ -247,6 +247,35 @@ function formatElapsedMs(ms: number) {
   return `${seconds}s`;
 }
 
+function estimateDataUrlBytes(dataUrl: string) {
+  const commaIndex = dataUrl.indexOf(',');
+
+  if (commaIndex < 0) {
+    return 0;
+  }
+
+  const base64Payload = dataUrl.slice(commaIndex + 1);
+  const paddingLength = base64Payload.endsWith('==')
+    ? 2
+    : base64Payload.endsWith('=')
+      ? 1
+      : 0;
+
+  return Math.max(0, Math.floor((base64Payload.length * 3) / 4) - paddingLength);
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 function formatOcrTraceText(text: string) {
   const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
   const escaped = normalized.replace(/\n/g, '\\n');
@@ -681,6 +710,11 @@ async function extractTextFromVisionPages(input: {
       slotCount: 1,
       attempt,
     });
+    const pageSizeSummary = input.visionPages.map((page) => ({
+      pageNumber: page.page_number,
+      bytes: estimateDataUrlBytes(page.image_data_url),
+    }));
+    const totalImageBytes = pageSizeSummary.reduce((sum, entry) => sum + entry.bytes, 0);
     const timeoutId = setTimeout(
       () => controller.abort(),
       requestTimeoutMs,
@@ -695,7 +729,9 @@ async function extractTextFromVisionPages(input: {
         `[PDF Fill][OCR] Starting ${batchLabel} for ${input.documentName} ` +
         `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, pages: ${input.visionPages
           .map((page) => page.page_number)
-          .join(',')}, timeout: ${formatElapsedMs(requestTimeoutMs)}).`;
+          .join(',')}, timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}, page image sizes: ${pageSizeSummary
+          .map((entry) => `${entry.pageNumber}=${formatBytes(entry.bytes)}`)
+          .join('; ')}).`;
       console.info(batchStartedMessage);
       await input.onTrace?.({ message: batchStartedMessage });
 
@@ -793,7 +829,7 @@ async function extractTextFromVisionPages(input: {
       const batchElapsedMs = Date.now() - batchStartedAt;
       const batchCompletedMessage =
         `[PDF Fill][OCR] Completed ${batchLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}) with ${ocrPages.length} OCR text pages in ${formatElapsedMs(batchElapsedMs)}.`;
+        `(attempt ${attempt}) with ${ocrPages.length} OCR text pages in ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}).`;
       console.info(batchCompletedMessage);
       await input.onTrace?.({ message: batchCompletedMessage });
       for (const page of ocrPages) {
@@ -826,7 +862,7 @@ async function extractTextFromVisionPages(input: {
       const batchElapsedMs = Date.now() - batchStartedAt;
       const batchFailedMessage =
         `[PDF Fill][OCR] Failed ${batchLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}) after ${formatElapsedMs(batchElapsedMs)}.`;
+        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}) after ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}).`;
       console.error(batchFailedMessage, normalizedError);
       await input.onTrace?.({ message: batchFailedMessage });
 
