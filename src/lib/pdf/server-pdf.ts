@@ -1,12 +1,5 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import {
-  DOMMatrix,
-  ImageData,
-  Path2D,
-  createCanvas,
-} from '@napi-rs/canvas';
-import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 
 const OCR_RENDER_SCALE = 6.0;
@@ -18,22 +11,26 @@ const PDFJS_STANDARD_FONT_DATA_URL = `${pathToFileURL(
   path.join(process.cwd(), 'node_modules', 'pdfjs-dist', 'standard_fonts'),
 ).href}/`;
 
-if (typeof globalThis.DOMMatrix === 'undefined') {
-  globalThis.DOMMatrix = DOMMatrix as typeof globalThis.DOMMatrix;
-}
-
-if (typeof globalThis.ImageData === 'undefined') {
-  globalThis.ImageData = ImageData as typeof globalThis.ImageData;
-}
-
-if (typeof globalThis.Path2D === 'undefined') {
-  globalThis.Path2D = Path2D as typeof globalThis.Path2D;
-}
-
 export async function renderPdfPagesForVisionOnServer(input: {
   pdfBytes: Uint8Array;
   originalPageNumbers: number[];
 }): Promise<PdfVisionPageInput[]> {
+  const canvasModule = await import('@napi-rs/canvas');
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const { DOMMatrix, ImageData, Path2D, createCanvas } = canvasModule;
+
+  if (typeof globalThis.DOMMatrix === 'undefined') {
+    globalThis.DOMMatrix = DOMMatrix as typeof globalThis.DOMMatrix;
+  }
+
+  if (typeof globalThis.ImageData === 'undefined') {
+    globalThis.ImageData = ImageData as typeof globalThis.ImageData;
+  }
+
+  if (typeof globalThis.Path2D === 'undefined') {
+    globalThis.Path2D = Path2D as typeof globalThis.Path2D;
+  }
+
   const pdfDocument = await pdfjs.getDocument({
     data: input.pdfBytes,
     cMapUrl: PDFJS_CMAP_URL,

@@ -6,7 +6,6 @@ import type {
 } from '@/src/lib/llm/fill-template-from-pdf';
 import { fillTemplateSlotsFromPdf } from '@/src/lib/llm/fill-template-from-pdf';
 import { buildErrorLogPayload, logEvent } from '@/src/lib/logging/log-event';
-import { renderPdfPagesForVisionOnServer } from '@/src/lib/pdf/server-pdf';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
@@ -117,6 +116,7 @@ async function buildVisionPagesForTaskItem(params: {
   admin: AdminClient;
   item: GenerationTaskItemRecord;
 }) {
+  const { renderPdfPagesForVisionOnServer } = await import('@/src/lib/pdf/server-pdf');
   const originalPageNumbers = normalizeSelectedOriginalPageNumbers(
     params.item.llm_input?.selected_original_page_numbers,
   );
