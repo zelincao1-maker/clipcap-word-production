@@ -11,6 +11,7 @@ import {
   Progress,
   Stack,
   Text,
+  TextInput,
   Title,
 } from '@mantine/core';
 import type { ContextModalProps } from '@mantine/modals';
@@ -21,7 +22,6 @@ import type { GenerationTaskItemSummary } from '@/src/app/api/types/generation-t
 import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
 import {
   parsePdf,
-  pickVisionPageNumbers,
   renderPdfPagesForVision,
 } from '@/src/lib/pdf/client-pdf';
 import {
@@ -38,13 +38,170 @@ interface BatchGenerateModalInnerProps {
 interface UploadRow {
   id: string;
   file: File | null;
+  parsedPdf: Awaited<ReturnType<typeof parsePdf>> | null;
+  isParsing: boolean;
+  parseError: string | null;
+  pageSelectionMode: 'custom';
+  pageRangeInput: string;
+  forceOcr: boolean;
+}
+
+declare global {
+  interface Window {
+    clipcapOcrImages?: Array<{
+      fileName: string;
+      originalPageNumber: number;
+      uploadedPageNumber: number;
+      previewUrl: string;
+      imageDataUrl: string;
+    }>;
+    clipcapOcrTextPages?: Array<{
+      fileName: string;
+      uploadedPageNumber: number;
+      text: string;
+    }>;
+    clipcapSlotFillInputs?: Array<{
+      fileName: string;
+      label: string;
+      data: {
+        document_name: string;
+        page_numbers: number[];
+        slot_definitions: Array<{
+          slot_key: string;
+          slot_name: string;
+          slot_meaning: string;
+        }>;
+        content: string;
+      };
+    }>;
+  }
 }
 
 function createUploadRow(): UploadRow {
   return {
     id: crypto.randomUUID(),
     file: null,
+    parsedPdf: null,
+    isParsing: false,
+    parseError: null,
+    pageSelectionMode: 'custom',
+    pageRangeInput: '',
+    forceOcr: false,
   };
+}
+
+function buildFullPageNumbers(totalPages: number) {
+  return Array.from({ length: totalPages }, (_, index) => index + 1);
+}
+
+function formatCompactPageRanges(pageNumbers: number[]) {
+  if (pageNumbers.length === 0) {
+    return '';
+  }
+
+  const sorted = Array.from(new Set(pageNumbers)).sort((left, right) => left - right);
+  const ranges: string[] = [];
+  let rangeStart = sorted[0]!;
+  let previous = sorted[0]!;
+
+  for (let index = 1; index < sorted.length; index += 1) {
+    const current = sorted[index]!;
+
+    if (current === previous + 1) {
+      previous = current;
+      continue;
+    }
+
+    ranges.push(rangeStart === previous ? `${rangeStart}` : `${rangeStart}-${previous}`);
+    rangeStart = current;
+    previous = current;
+  }
+
+  ranges.push(rangeStart === previous ? `${rangeStart}` : `${rangeStart}-${previous}`);
+  return ranges.join('、');
+}
+
+function dataUrlToObjectUrl(dataUrl: string) {
+  const [header, base64Payload] = dataUrl.split(',', 2);
+
+  if (!header || !base64Payload) {
+    throw new Error('OCR 图片数据无效，无法生成预览链接。');
+  }
+
+  const mimeTypeMatch = header.match(/^data:(.*?);base64$/);
+  const mimeType = mimeTypeMatch?.[1] || 'image/png';
+  const binary = atob(base64Payload);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+}
+
+function parseSelectedPageNumbers(input: string, totalPages: number) {
+  const normalized = input.replace(/[，；;\s]+/g, ',').trim();
+
+  if (!normalized) {
+    return { pageNumbers: [] as number[], error: '请输入页码范围' };
+  }
+
+  const values = new Set<number>();
+  const parts = normalized.split(',').map((part) => part.trim()).filter(Boolean);
+
+  for (const part of parts) {
+    const rangeMatch = part.match(/^(\d+)-(\d+)$/);
+
+    if (rangeMatch) {
+      const start = Number(rangeMatch[1]);
+      const end = Number(rangeMatch[2]);
+
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end <= 0) {
+        return { pageNumbers: [] as number[], error: `页码范围 "${part}" 无效` };
+      }
+
+      if (start > end) {
+        return { pageNumbers: [] as number[], error: `页码范围 "${part}" 起始页不能大于结束页` };
+      }
+
+      if (end > totalPages) {
+        return {
+          pageNumbers: [] as number[],
+          error: `页码范围 "${part}" 超出总页数 ${totalPages} 页`,
+        };
+      }
+
+      for (let pageNumber = start; pageNumber <= end; pageNumber += 1) {
+        values.add(pageNumber);
+      }
+
+      continue;
+    }
+
+    const pageNumber = Number(part);
+
+    if (!Number.isInteger(pageNumber) || pageNumber <= 0) {
+      return { pageNumbers: [] as number[], error: `页码 "${part}" 无效` };
+    }
+
+    if (pageNumber > totalPages) {
+      return {
+        pageNumbers: [] as number[],
+        error: `页码 "${part}" 超出总页数 ${totalPages} 页`,
+      };
+    }
+
+    values.add(pageNumber);
+  }
+
+  const pageNumbers = Array.from(values).sort((left, right) => left - right);
+
+  if (pageNumbers.length === 0) {
+    return { pageNumbers, error: '请选择至少 1 页' };
+  }
+
+  return { pageNumbers, error: null };
 }
 
 function getStatusColor(status: string) {
@@ -91,6 +248,10 @@ function formatElapsedSeconds(item: GenerationTaskItemSummary, now: number, star
   return item.elapsed_seconds;
 }
 
+function getPendingSlotCount(item: GenerationTaskItemSummary) {
+  return Math.max(0, item.slot_total_count - item.slot_completed_count);
+}
+
 export function BatchGenerateModal({
   context,
   id,
@@ -106,6 +267,7 @@ export function BatchGenerateModal({
   const taskQuery = useGenerationTask(taskId);
   const launchedItemIdsRef = useRef<Set<string>>(new Set());
   const itemStartedAtRef = useRef<Map<string, number>>(new Map());
+  const itemTraceRef = useRef<Map<string, string>>(new Map());
   const refreshTaskLists = async () => {
     await Promise.all([
       taskId
@@ -116,13 +278,46 @@ export function BatchGenerateModal({
     ]);
   };
 
-  const selectedFiles = rows.map((row) => row.file).filter((file): file is File => Boolean(file));
+  const rowsWithFiles = rows.filter((row): row is UploadRow & { file: File } => Boolean(row.file));
+  const hasParsingRows = rowsWithFiles.some((row) => row.isParsing);
+  const hasRowParseError = rowsWithFiles.some((row) => Boolean(row.parseError));
+  const hasUnparsedRows = rowsWithFiles.some((row) => !row.parsedPdf);
+  const selectedFiles = rowsWithFiles.map((row) => row.file);
+  const rowSelectionStates = useMemo(
+    () =>
+      rows.map((row) => {
+        const totalPages = row.parsedPdf?.pages.length ?? 0;
+        const allPageNumbers = totalPages > 0 ? buildFullPageNumbers(totalPages) : [];
+        const customSelection =
+          totalPages > 0
+            ? parseSelectedPageNumbers(row.pageRangeInput, totalPages)
+            : { pageNumbers: [] as number[], error: null as string | null };
+        const selectedPageNumbers = customSelection.pageNumbers;
+        const selectionError = customSelection.error;
+
+        return {
+          rowId: row.id,
+          totalPages,
+          selectedPageNumbers,
+          selectionError,
+          selectedPageRangeLabel: formatCompactPageRanges(selectedPageNumbers),
+        };
+      }),
+    [rows],
+  );
+  const hasInvalidSelection = rowSelectionStates.some(
+    (state) => state.totalPages > 0 && Boolean(state.selectionError),
+  );
 
   const canSubmit =
     selectedFiles.length > 0 &&
     !createGenerationTaskMutation.isPending &&
     !isPreparingFiles &&
-    !taskId;
+    !taskId &&
+    !hasParsingRows &&
+    !hasRowParseError &&
+    !hasUnparsedRows &&
+    !hasInvalidSelection;
   const isSubmittingTask = !taskId && (createGenerationTaskMutation.isPending || isPreparingFiles);
 
   const taskItems = taskQuery.data?.items ?? [];
@@ -222,10 +417,158 @@ export function BatchGenerateModal({
     });
   }, [processGenerationTaskItemMutation, queryClient, taskId, taskQuery.data]);
 
-  const updateRowFile = (rowId: string, file: File | null) => {
+  useEffect(() => {
+    if (!taskQuery.data) {
+      return;
+    }
+
+    const nextKnownIds = new Set<string>();
+
+    taskQuery.data.items.forEach((item) => {
+      nextKnownIds.add(item.id);
+
+      const nextTrace = item.processing_trace ?? '';
+      const previousTrace = itemTraceRef.current.get(item.id) ?? '';
+
+      if (!nextTrace || nextTrace === previousTrace) {
+        if (!itemTraceRef.current.has(item.id)) {
+          itemTraceRef.current.set(item.id, nextTrace);
+        }
+        return;
+      }
+
+      const previousLines = previousTrace ? previousTrace.split(/\r?\n/) : [];
+      const nextLines = nextTrace.split(/\r?\n/);
+      const newLines = nextLines.slice(previousLines.length).filter((line) => line.trim().length > 0);
+
+      newLines.forEach((line) => {
+        const ocrPageDataMatch = line.match(/^\[PDF Fill\]\[OCR\]\[PageData (\d+)\] (.+)$/);
+        const slotFillInputMatch = line.match(
+          /^(?:\[PDF Fill\])?\[TextInputData\]\[(.+)\] (.+)$/,
+        );
+
+        if (ocrPageDataMatch) {
+          const uploadedPageNumber = Number(ocrPageDataMatch[1]);
+          const payload = JSON.parse(ocrPageDataMatch[2] ?? '{}') as { text?: string };
+          const decodedText = payload.text ?? '';
+          const currentEntries = window.clipcapOcrTextPages ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name &&
+                entry.uploadedPageNumber === uploadedPageNumber
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            uploadedPageNumber,
+            text: decodedText,
+          });
+
+          window.clipcapOcrTextPages = nextEntries.sort((left, right) => {
+            if (left.fileName === right.fileName) {
+              return left.uploadedPageNumber - right.uploadedPageNumber;
+            }
+
+            return left.fileName.localeCompare(right.fileName);
+          });
+
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] OCR full text stored in window.clipcapOcrTextPages for uploaded page ${uploadedPageNumber}.`,
+          );
+          return;
+        }
+
+        if (slotFillInputMatch) {
+          const label = slotFillInputMatch[1] ?? 'Full';
+          const parsedData = JSON.parse(slotFillInputMatch[2] ?? '{}') as {
+            document_name: string;
+            page_numbers: number[];
+            slot_definitions: Array<{
+              slot_key: string;
+              slot_name: string;
+              slot_meaning: string;
+            }>;
+            content: string;
+          };
+          const currentEntries = window.clipcapSlotFillInputs ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) => !(entry.fileName === item.source_pdf_name && entry.label === label),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            label,
+            data: parsedData,
+          });
+
+          window.clipcapSlotFillInputs = nextEntries.sort((left, right) => {
+            if (left.fileName === right.fileName) {
+              return left.label.localeCompare(right.label);
+            }
+
+            return left.fileName.localeCompare(right.fileName);
+          });
+
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill input stored in window.clipcapSlotFillInputs (${label}).`,
+          );
+          return;
+        }
+
+        console.info(`[Batch Generate][${item.source_pdf_name}] ${line}`);
+      });
+
+      itemTraceRef.current.set(item.id, nextTrace);
+    });
+
+    Array.from(itemTraceRef.current.keys()).forEach((itemId) => {
+      if (!nextKnownIds.has(itemId)) {
+        itemTraceRef.current.delete(itemId);
+      }
+    });
+  }, [taskQuery.data]);
+
+  const updateRow = (rowId: string, patch: Partial<UploadRow>) => {
     setRows((currentRows) =>
-      currentRows.map((row) => (row.id === rowId ? { ...row, file } : row)),
+      currentRows.map((row) => (row.id === rowId ? { ...row, ...patch } : row)),
     );
+  };
+
+  const handleSelectPdfFile = async (rowId: string, file: File | null) => {
+    updateRow(rowId, {
+      file,
+      parsedPdf: null,
+      isParsing: Boolean(file),
+      parseError: null,
+      pageSelectionMode: 'custom',
+      pageRangeInput: '',
+      forceOcr: false,
+    });
+
+    if (!file) {
+      updateRow(rowId, {
+        isParsing: false,
+      });
+      return;
+    }
+
+    try {
+      const parsedPdf = await parsePdf(file);
+
+      updateRow(rowId, {
+        parsedPdf,
+        isParsing: false,
+        parseError: null,
+      });
+    } catch (error) {
+      updateRow(rowId, {
+        parsedPdf: null,
+        isParsing: false,
+        parseError: error instanceof Error ? error.message : 'PDF 解析失败，请重新选择文件。',
+      });
+    }
   };
 
   const handleCreateTask = async () => {
@@ -237,18 +580,84 @@ export function BatchGenerateModal({
 
     try {
       const preparedFiles = await Promise.all(
-        selectedFiles.map(async (file) => {
-          const parsedPdf = await parsePdf(file);
-          const visionPageNumbers = parsedPdf.likelyScanned ? pickVisionPageNumbers(parsedPdf) : [];
+        rowsWithFiles.map(async (row) => {
+          const file = row.file;
+          const parsedPdf = row.parsedPdf;
+          const rowSelectionState = rowSelectionStates.find((state) => state.rowId === row.id);
+
+          if (!parsedPdf || !rowSelectionState) {
+            throw new Error('当前 PDF 尚未解析完成，请稍候再试。');
+          }
+
+          const selectedOriginalPageNumbers = rowSelectionState.selectedPageNumbers;
+          const selectedPageSet = new Set(selectedOriginalPageNumbers);
+          const selectedParsedPages = parsedPdf.pages.filter((page) =>
+            selectedPageSet.has(page.pageNumber),
+          );
+          const selectedTotalTextLength = selectedParsedPages.reduce(
+            (sum, page) => sum + page.text.length,
+            0,
+          );
+          const selectedLikelyScanned = true;
+          const remappedParsedPdf = {
+            ...parsedPdf,
+            pages: selectedParsedPages.map((page, index) => ({
+              pageNumber: index + 1,
+              text: page.text,
+            })),
+            fullText: selectedParsedPages.map((page) => page.text).join('\n'),
+            totalTextLength: selectedTotalTextLength,
+            likelyScanned: selectedLikelyScanned,
+          };
+          const selectedVisionPageNumbers = selectedOriginalPageNumbers;
           const visionPages =
-            parsedPdf.likelyScanned && visionPageNumbers.length > 0
-              ? await renderPdfPagesForVision(file, visionPageNumbers)
+            selectedVisionPageNumbers.length > 0
+              ? await renderPdfPagesForVision(file, selectedVisionPageNumbers)
               : [];
+          const ocrImageDebugEntries = visionPages.map((page, index) => ({
+            fileName: file.name,
+            originalPageNumber: selectedOriginalPageNumbers[index] ?? page.pageNumber,
+            uploadedPageNumber: index + 1,
+            previewUrl: dataUrlToObjectUrl(page.imageDataUrl),
+            imageDataUrl: page.imageDataUrl,
+          }));
+
+          window.clipcapOcrImages?.forEach((entry) => {
+            URL.revokeObjectURL(entry.previewUrl);
+          });
+          window.clipcapOcrImages = ocrImageDebugEntries;
+
+          if (ocrImageDebugEntries.length > 0) {
+            console.info(
+              `[Batch Generate][${file.name}] OCR images prepared: ${ocrImageDebugEntries.length} page(s). Use window.clipcapOcrImages in the browser console, or run window.open(window.clipcapOcrImages[0].previewUrl).`,
+            );
+            ocrImageDebugEntries.forEach((entry) => {
+              console.info(
+                `[Batch Generate][${file.name}][OCR Image] uploaded page ${entry.uploadedPageNumber}, original PDF page ${entry.originalPageNumber}: ${entry.previewUrl}`,
+              );
+            });
+          }
+          const remappedVisionPages = visionPages.map((page, index) => ({
+            pageNumber: index + 1,
+            imageDataUrl: page.imageDataUrl,
+          }));
+          const uploadedPageNumberMapping = selectedOriginalPageNumbers.map(
+            (originalPageNumber, index) => ({
+              uploaded_page_number: index + 1,
+              original_page_number: originalPageNumber,
+            }),
+          );
 
           return {
             file,
-            parsedPdf,
-            visionPages,
+            parsedPdf: remappedParsedPdf,
+            visionPages: remappedVisionPages,
+            selectedOriginalPageNumbers,
+            uploadedPageNumberMapping,
+            originalTotalPages: parsedPdf.pages.length,
+            forceOcr: false,
+            selectedPageRangeLabel:
+              rowSelectionState.selectedPageRangeLabel || '全部页面',
           };
         }),
       );
@@ -379,7 +788,7 @@ export function BatchGenerateModal({
                     style={{ display: 'none' }}
                     type="file"
                     onChange={(event) => {
-                      updateRowFile(row.id, event.currentTarget.files?.[0] ?? null);
+                      void handleSelectPdfFile(row.id, event.currentTarget.files?.[0] ?? null);
                       event.currentTarget.value = '';
                     }}
                   />
@@ -397,6 +806,105 @@ export function BatchGenerateModal({
                       {row.file ? '重新选择 PDF' : '上传 PDF'}
                     </Button>
                   </Group>
+                  {row.file && row.parsedPdf ? (
+                    <Paper
+                      p="sm"
+                      radius="lg"
+                      style={{
+                        background: 'rgba(255,255,255,0.03)',
+                        border: '1px solid rgba(255,255,255,0.06)',
+                      }}
+                    >
+                      <Stack gap="sm">
+                        <Text fw={600} size="sm">
+                          回填页范围
+                        </Text>
+
+                        <Text c="dimmed" size="xs">
+                          总页数：{row.parsedPdf.pages.length} 页
+                        </Text>
+
+                        <TextInput
+                          description="支持 1-5、1,3,5、1-5,9,12-16"
+                          error={
+                            rowSelectionStates.find((state) => state.rowId === row.id)
+                              ?.selectionError ?? undefined
+                          }
+                          label="页码范围"
+                          placeholder="例如：1-5,9,12-16"
+                          radius="lg"
+                          size="sm"
+                          value={row.pageRangeInput}
+                          onChange={(event) => {
+                            updateRow(row.id, {
+                              pageRangeInput: event.currentTarget.value,
+                            });
+                          }}
+                        />
+
+                        <Text c="yellow" fw={600} size="xs">
+                          使用全部页面处理时间较长
+                        </Text>
+
+                        {(() => {
+                          const selectionState = rowSelectionStates.find(
+                            (state) => state.rowId === row.id,
+                          );
+
+                          if (!selectionState || selectionState.selectedPageNumbers.length === 0) {
+                            return null;
+                          }
+
+                          return (
+                            <Stack gap={6}>
+                              <Text c="dimmed" size="xs">
+                                将上传 {selectionState.selectedPageNumbers.length} 页，对应原 PDF 第{' '}
+                                {selectionState.selectedPageRangeLabel} 页
+                              </Text>
+                              <Box
+                                style={{
+                                  display: 'grid',
+                                  gridTemplateColumns: 'repeat(auto-fill, minmax(40px, 1fr))',
+                                  gap: 8,
+                                }}
+                              >
+                                {buildFullPageNumbers(row.parsedPdf.pages.length).map((pageNumber) => {
+                                  const isSelected = selectionState.selectedPageNumbers.includes(pageNumber);
+
+                                  return (
+                                    <Box
+                                      key={`${row.id}-page-${pageNumber}`}
+                                      style={{
+                                        borderRadius: 10,
+                                        padding: '6px 0',
+                                        textAlign: 'center',
+                                        fontSize: 12,
+                                        fontWeight: 600,
+                                        border: `1px solid ${
+                                          isSelected
+                                            ? 'rgba(32, 201, 151, 0.52)'
+                                            : 'rgba(255,255,255,0.10)'
+                                        }`,
+                                        background: isSelected
+                                          ? 'rgba(32, 201, 151, 0.14)'
+                                          : 'rgba(255,255,255,0.03)',
+                                        color: isSelected ? '#d8fff1' : 'var(--mantine-color-dimmed)',
+                                      }}
+                                    >
+                                      {pageNumber}
+                                    </Box>
+                                  );
+                                })}
+                              </Box>
+                              <Text c="dimmed" size="xs">
+                                仅会基于所选页面进行槽位回填，未选择页面中的证据不会参与抽取。
+                              </Text>
+                            </Stack>
+                          );
+                        })()}
+                      </Stack>
+                    </Paper>
+                  ) : null}
                 </Stack>
               </Paper>
             ))}
@@ -481,6 +989,12 @@ export function BatchGenerateModal({
                     {item.error_message ? (
                       <Text c="red" size="sm">
                         {item.error_message}
+                      </Text>
+                    ) : null}
+
+                    {['uploaded', 'running', 'pending'].includes(item.status) && item.slot_total_count > 0 ? (
+                      <Text c="dimmed" size="sm">
+                        已完成 {item.slot_completed_count} 个槽位，待抽取 {getPendingSlotCount(item)} 个槽位
                       </Text>
                     ) : null}
 

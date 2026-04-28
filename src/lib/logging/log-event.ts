@@ -22,6 +22,27 @@ export interface LogEventResult {
   error?: Error;
 }
 
+export function buildErrorLogPayload(
+  error: unknown,
+  extra?: Record<string, unknown> | null,
+): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      errorName: error.name,
+      errorMessage: error.message,
+      errorStack: error.stack ?? null,
+      ...(extra ?? {}),
+    };
+  }
+
+  return {
+    errorName: 'UnknownError',
+    errorMessage: typeof error === 'string' ? error : String(error),
+    errorStack: null,
+    ...(extra ?? {}),
+  };
+}
+
 export async function logEvent(input: LogEventInput): Promise<LogEventResult> {
   try {
     const supabase = createSupabaseAdminClient();

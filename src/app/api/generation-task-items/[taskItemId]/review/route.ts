@@ -65,7 +65,7 @@ export async function POST(
       })
       .eq('id', taskItemId)
       .select(
-        'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, created_at, reviewed_at, output_docx_path, error_message, llm_input, llm_output, review_payload, started_at, finished_at',
+        'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, reviewed_at, output_docx_path, error_message, llm_input, llm_output, review_payload, started_at, finished_at',
       )
       .single();
 

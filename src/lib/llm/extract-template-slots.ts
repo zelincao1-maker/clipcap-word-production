@@ -11,8 +11,8 @@ import {
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 
 const EXTRACTION_TIMEOUT_MS = 120000;
-const EXTRACTION_CONCURRENCY = 2;
 const EXTRACTION_MAX_RETRIES = 2;
+const MIN_PARAGRAPH_CHARACTER_COUNT = 6;
 
 const EXTRACTION_SYSTEM_PROMPT = `
 你是中文法律文书模板槽位抽取助手。
@@ -21,14 +21,13 @@ const EXTRACTION_SYSTEM_PROMPT = `
 1. 只处理当前传入的单个段落，只能依据当前段落内容抽取槽位。
 2. 默认优先抽取与“被申请人 / 被告 / 借款人 / 乙方 / 客户”等目标主体直接相关的信息。
 3. 默认重点关注的字段包括但不限于：姓名、身份证号、民族、性别、出生日期、住址、联系电话、金额、日期、百分比、利率、分期期数等。
-4. 如果用户提供了额外抽取要求，需要在基础抽取内容之外一并抽取这些额外字段，例如汽车牌照、汽车品牌、车型、合同编号、银行卡号等。
 
 抽取规则：
 1. 只返回 JSON，不要返回解释、Markdown、代码块或其他多余文本。
 2. 只能抽取当前段落中真实出现的信息，不要编造，也不要补全未出现的值。
 3. items 必须按照原文出现顺序输出。
 4. original_value 必须保留原文格式。
-5. original_doc_position 必须是来自当前段落、能够定位到原文的精确短语或片段。
+5. original_doc_position 必须来自当前段落、能够定位到原文的精确短语或片段。
 6. 同一段中如果出现多个不同含义的日期、金额、百分比、利率等，必须分别抽取，不能合并，也不能遗漏。
 7. field_category 必须返回中文，不要返回 vehicle_plate_number、vehicle_brand 这种英文字段名。
 8. 除非用户明确要求，否则忽略与目标主体无关的申请人、法院、仲裁委、代理人等主体信息。
@@ -60,6 +59,18 @@ interface ExtractedParagraph {
   paragraph_index: number;
   paragraph_title: string;
   paragraph_text: string;
+}
+
+interface ParagraphProgress {
+  completedParagraphs: number;
+  totalParagraphs: number;
+}
+
+interface ExtractTemplateSlotsFromDocxParams {
+  buffer: Buffer;
+  prompt: string;
+  fileName: string;
+  onParagraphComplete?: (progress: ParagraphProgress) => Promise<void> | void;
 }
 
 function wait(ms: number) {
@@ -194,7 +205,11 @@ function buildParagraphTitle(paragraphText: string, paragraphIndex: number) {
   return `${normalized.slice(0, 24)}...`;
 }
 
-function extractParagraphsFromRawText(uploadText: string): ExtractedParagraph[] {
+function countMeaningfulCharacters(paragraphText: string) {
+  return paragraphText.replace(/\s+/g, '').length;
+}
+
+export function extractParagraphsFromRawText(uploadText: string): ExtractedParagraph[] {
   return uploadText
     .split(/\n{2,}/)
     .map((paragraphText) => paragraphText.trim())
@@ -204,6 +219,16 @@ function extractParagraphsFromRawText(uploadText: string): ExtractedParagraph[] 
       paragraph_title: buildParagraphTitle(paragraphText, paragraphIndex),
       paragraph_text: paragraphText,
     }));
+}
+
+export function filterExtractableParagraphs(paragraphs: ExtractedParagraph[]) {
+  return paragraphs.filter(
+    (paragraph) => countMeaningfulCharacters(paragraph.paragraph_text) >= MIN_PARAGRAPH_CHARACTER_COUNT,
+  );
+}
+
+export function countExtractableParagraphsFromRawText(uploadText: string) {
+  return filterExtractableParagraphs(extractParagraphsFromRawText(uploadText)).length;
 }
 
 async function extractSlotsForParagraph(params: {
@@ -243,10 +268,11 @@ async function extractSlotsForParagraph(params: {
   };
 }
 
-async function extractParagraphsInBatches(params: {
+async function extractParagraphsConcurrently(params: {
   fileName: string;
   prompt: string;
   paragraphs: ExtractedParagraph[];
+  onParagraphComplete?: (progress: ParagraphProgress) => Promise<void> | void;
 }) {
   const extractedParagraphs: Array<{
     paragraph_index: number;
@@ -261,35 +287,45 @@ async function extractParagraphsInBatches(params: {
     }>;
   }> = [];
 
-  for (let index = 0; index < params.paragraphs.length; index += EXTRACTION_CONCURRENCY) {
-    const batch = params.paragraphs.slice(index, index + EXTRACTION_CONCURRENCY);
-    const batchResults = await Promise.all(
-      batch.map((paragraph) =>
-        extractSlotsForParagraph({
-          fileName: params.fileName,
-          prompt: params.prompt,
-          paragraph,
-        }),
-      ),
-    );
+  let completedParagraphs = 0;
+  const totalParagraphs = params.paragraphs.length;
 
-    for (const result of batchResults) {
-      if (!result || result.items.length === 0) {
-        continue;
-      }
+  const results = await Promise.all(
+    params.paragraphs.map(async (paragraph) => {
+      const result = await extractSlotsForParagraph({
+        fileName: params.fileName,
+        prompt: params.prompt,
+        paragraph,
+      });
 
-      extractedParagraphs.push(result);
+      completedParagraphs += 1;
+      await params.onParagraphComplete?.({
+        completedParagraphs,
+        totalParagraphs,
+      });
+
+      return result;
+    }),
+  );
+
+  for (const result of results) {
+    if (!result || result.items.length === 0) {
+      continue;
     }
+
+    extractedParagraphs.push(result);
   }
 
   return extractedParagraphs;
 }
 
-export async function extractTemplateSlotsFromDocx(params: {
-  buffer: Buffer;
-  prompt: string;
-  fileName: string;
-}): Promise<TemplateSlotExtractionResult & { uploadText: string; uploadHtml: string }> {
+export async function extractTemplateSlotsFromDocx(
+  params: ExtractTemplateSlotsFromDocxParams,
+): Promise<TemplateSlotExtractionResult & {
+  uploadText: string;
+  uploadHtml: string;
+  totalParagraphs: number;
+}> {
   const uploadText = await extractTextFromDocxBuffer(params.buffer);
   const uploadHtml = await extractHtmlFromDocxBuffer(params.buffer);
 
@@ -303,10 +339,17 @@ export async function extractTemplateSlotsFromDocx(params: {
     throw new Error('No usable paragraphs were found in the DOCX file.');
   }
 
-  const extractedParagraphs = await extractParagraphsInBatches({
+  const extractableParagraphs = filterExtractableParagraphs(paragraphs);
+
+  if (extractableParagraphs.length === 0) {
+    throw new Error('No extractable paragraphs were found in the DOCX file.');
+  }
+
+  const extractedParagraphs = await extractParagraphsConcurrently({
     fileName: params.fileName,
     prompt: params.prompt,
-    paragraphs,
+    paragraphs: extractableParagraphs,
+    onParagraphComplete: params.onParagraphComplete,
   });
 
   extractedParagraphs.sort((left, right) => left.paragraph_index - right.paragraph_index);
@@ -327,5 +370,6 @@ export async function extractTemplateSlotsFromDocx(params: {
     extraction_result: normalizedExtractionResult,
     uploadText,
     uploadHtml,
+    totalParagraphs: extractableParagraphs.length,
   };
 }

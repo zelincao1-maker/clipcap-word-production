@@ -49,7 +49,7 @@ export async function GET(
     const { data: items, error: itemsError } = await supabase
       .from('generation_task_items')
       .select(
-        'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, created_at, reviewed_at, output_docx_path, error_message',
+        'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, reviewed_at, output_docx_path, error_message',
       )
       .eq('task_id', taskId)
       .order('created_at', { ascending: true });

@@ -158,6 +158,57 @@ function formatPageNumbers(pageNumbers: number[]) {
   return `PDF 第 ${pageNumbers.join('、')} 页`;
 }
 
+function normalizeUploadedPageNumberMapping(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter(
+      (
+        entry,
+      ): entry is {
+        uploaded_page_number: number;
+        original_page_number: number;
+      } =>
+        !!entry &&
+        typeof entry === 'object' &&
+        typeof (entry as { uploaded_page_number?: unknown }).uploaded_page_number === 'number' &&
+        typeof (entry as { original_page_number?: unknown }).original_page_number === 'number',
+    )
+    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
+}
+
+function formatEvidenceSource(
+  uploadedPageNumbers: number[],
+  pageNumberMapping: Array<{ uploaded_page_number: number; original_page_number: number }>,
+) {
+  if (uploadedPageNumbers.length === 0) {
+    return '未定位页码';
+  }
+
+  if (pageNumberMapping.length === 0) {
+    return formatPageNumbers(uploadedPageNumbers);
+  }
+
+  const mappingMap = new Map(
+    pageNumberMapping.map((entry) => [entry.uploaded_page_number, entry.original_page_number]),
+  );
+  const originalPageNumbers = uploadedPageNumbers
+    .map((uploadedPageNumber) => mappingMap.get(uploadedPageNumber))
+    .filter((pageNumber): pageNumber is number => typeof pageNumber === 'number');
+
+  if (originalPageNumbers.length === 0) {
+    return formatPageNumbers(uploadedPageNumbers);
+  }
+
+  return `上传页序第 ${uploadedPageNumbers.join('、')} 页，对应原 PDF 第 ${originalPageNumbers.join('、')} 页`;
+}
+
+function hasManualFillPending(value: string | null | undefined) {
+  return !value?.trim();
+}
+
 function textStyleToCss(style: TextStyleSnapshot): CSSProperties {
   return {
     fontWeight: style.bold ? 700 : undefined,
@@ -800,7 +851,36 @@ export default function GenerationReviewPage() {
     originalSlots.find((slot) => slot.slot_key === activeOriginalSlotKey) ?? null;
   const activeFilledItem =
     items.find((item) => item.slot_key === activeFilledSlotKey) ?? null;
+  const pendingManualFillItems = useMemo(
+    () => items.filter((item) => hasManualFillPending(item.original_value)),
+    [items],
+  );
   const stablePdfPreviewUrl = taskItemQuery.data?.item.pdf_preview_url ?? null;
+  const uploadedPageNumberMapping = useMemo(
+    () =>
+      normalizeUploadedPageNumberMapping(
+        taskItemQuery.data?.item.llm_input &&
+          typeof taskItemQuery.data.item.llm_input === 'object'
+          ? (taskItemQuery.data.item.llm_input as { uploaded_page_number_mapping?: unknown })
+              .uploaded_page_number_mapping
+          : null,
+      ),
+    [taskItemQuery.data?.item.llm_input],
+  );
+  const selectedPageRangeLabel = useMemo(() => {
+    if (
+      !taskItemQuery.data?.item.llm_input ||
+      typeof taskItemQuery.data.item.llm_input !== 'object'
+    ) {
+      return null;
+    }
+
+    const value = (
+      taskItemQuery.data.item.llm_input as { selected_page_range_label?: unknown }
+    ).selected_page_range_label;
+
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+  }, [taskItemQuery.data?.item.llm_input]);
   const structuredTemplatePreview = useMemo(
     () =>
       templatePreviewDocument
@@ -996,10 +1076,10 @@ export default function GenerationReviewPage() {
               <Stack gap="sm">
                 <Title order={5}>核查步骤</Title>
                 <Divider />
-                {[
+                {[ 
                   ['1', '查看模板预览', '了解模板结构和槽位位置'],
                   ['2', '核对 PDF 内容', '在 PDF 中找到对应信息'],
-                  ['3', '检查回填值', '将核对结果填到回填值中'],
+                  ['3', '检查回填值', '回填值为空时需要人工补全'],
                   ['4', '提交核查', '确认后提交核查结果'],
                 ].map(([step, title, description]) => (
                   <Paper key={step} p="sm" radius="lg" withBorder>
@@ -1020,7 +1100,7 @@ export default function GenerationReviewPage() {
                 <Title order={5}>操作提示</Title>
                 <Divider />
                 <Text c="dimmed" size="sm">点击模板槽位卡片可在左侧 DOCX 预览中高亮定位。</Text>
-                <Text c="dimmed" size="sm">对照 PDF 内容后，仅需填写回填值并检查证据来源。</Text>
+                <Text c="dimmed" size="sm">对照 PDF 内容后，如回填值为空，需要手动填写后再提交核查。</Text>
                 <Text c="dimmed" size="sm">本页已移除筛选、备注和证据预览，减少核查干扰。</Text>
               </Stack>
             </Card>
@@ -1124,7 +1204,14 @@ export default function GenerationReviewPage() {
                 <Stack gap="sm" h="100%">
                   <Group justify="space-between" align="center">
                     <Group gap="sm">
-                      <Title order={5}>PDF 预览</Title>
+                      <Group gap="xs">
+                        <Title order={5}>PDF 预览</Title>
+                        {selectedPageRangeLabel ? (
+                          <Badge color="teal" radius="sm" variant="light">
+                            上传范围：原 PDF 第 {selectedPageRangeLabel} 页
+                          </Badge>
+                        ) : null}
+                      </Group>
                       <Badge color="teal" radius="sm" variant="light">
                         已上传：{item.source_pdf_name}
                       </Badge>
@@ -1156,7 +1243,8 @@ export default function GenerationReviewPage() {
                       {originalSlots.map((slot, index) => {
                         const isActive = slot.slot_key === activeOriginalSlotKey;
                         const linkedFilledSlotKey = resolveLinkedFilledSlotKey(slot, originalSlots, items);
-
+                        const linkedFilledItem =
+                          items.find((item) => item.slot_key === linkedFilledSlotKey) ?? null;
                         return (
                         <Paper
                           key={slot.slot_key}
@@ -1210,13 +1298,15 @@ export default function GenerationReviewPage() {
                 </Stack>
               </Card>
 
-              <Card padding="md" radius="xl" withBorder style={{ gridColumn: 'span 4', minHeight: 460 }}>
-                {activeOriginalSlot || activeFilledItem ? (
-                  <Stack gap="sm" h="100%">
-                    <Title order={5}>填写回填值</Title>
-                    <Text c="dimmed" size="sm">
-                      当前槽位：
-                      {activeFilledItem?.field_category ||
+                <Card padding="md" radius="xl" withBorder style={{ gridColumn: 'span 4', minHeight: 460 }}>
+                  {activeOriginalSlot || activeFilledItem ? (
+                    <Stack gap="sm" h="100%">
+                      <Group justify="space-between" align="center">
+                        <Title order={5}>填写回填值</Title>
+                      </Group>
+                      <Text c="dimmed" size="sm">
+                        当前槽位：
+                        {activeFilledItem?.field_category ||
                         activeOriginalSlot?.field_category ||
                         '未选中槽位'}
                     </Text>
@@ -1241,14 +1331,19 @@ export default function GenerationReviewPage() {
                       value={activeOriginalSlot?.original_value ?? ''}
                     />
 
-                    <TextInput
-                      label="回填值"
-                      radius="lg"
-                      size="sm"
-                      value={activeFilledItem?.original_value ?? ''}
-                      onChange={(event) => {
-                        const nextValue = event.currentTarget.value;
-                        setItems((currentItems) =>
+                      <TextInput
+                        label="回填值"
+                        radius="lg"
+                        size="sm"
+                        value={activeFilledItem?.original_value ?? ''}
+                        error={
+                          hasManualFillPending(activeFilledItem?.original_value)
+                            ? '当前回填值为空，需要人工填写'
+                            : undefined
+                        }
+                        onChange={(event) => {
+                          const nextValue = event.currentTarget.value;
+                          setItems((currentItems) =>
                           currentItems.map((currentItem) =>
                             currentItem.slot_key === activeFilledSlotKey
                               ? { ...currentItem, original_value: nextValue }
@@ -1263,14 +1358,27 @@ export default function GenerationReviewPage() {
                       radius="lg"
                       readOnly
                       size="sm"
-                      value={formatPageNumbers(activeFilledItem?.evidence_page_numbers ?? [])}
+                      value={formatEvidenceSource(
+                        activeFilledItem?.evidence_page_numbers ?? [],
+                        uploadedPageNumberMapping,
+                      )}
                     />
 
-                    <Text c="dimmed" size="xs">
-                      模型抽取仅供参考，请结合 PDF 原文人工核对后再提交核查结果。
-                    </Text>
-                  </Stack>
-                ) : (
+                      <Text c="dimmed" size="xs">
+                        模型抽取仅供参考，请结合 PDF 原文人工核对后再提交核查结果。
+                      </Text>
+                      {pendingManualFillItems.length > 0 ? (
+                        <Text c="dimmed" size="xs">
+                          当前仍有 {pendingManualFillItems.length} 个槽位回填值为空。如该槽位本就应为空，可直接提交；如需补全，请结合 PDF 原文手动填写。
+                        </Text>
+                      ) : null}
+                      {hasManualFillPending(activeFilledItem?.original_value) ? (
+                        <Alert color="yellow" radius="lg" title="需要人工补全">
+                          这个槽位当前回填值为空。如该槽位本就应为空，可保持不填；如需补全，请根据 PDF 原文手动填写。
+                        </Alert>
+                      ) : null}
+                    </Stack>
+                  ) : (
                   <Alert color="yellow" radius="xl" title="暂无槽位结果">
                     当前任务项还没有可核查的槽位，请先回到批量生成列表确认视觉模型是否成功返回结果。
                   </Alert>

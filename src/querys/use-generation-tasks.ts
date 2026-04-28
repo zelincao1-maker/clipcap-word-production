@@ -11,6 +11,14 @@ export interface CreateGenerationTaskFileInput {
   file: File;
   parsedPdf: ParsedPdfDocument;
   visionPages: PdfVisionPageInput[];
+  selectedOriginalPageNumbers: number[];
+  uploadedPageNumberMapping: Array<{
+    uploaded_page_number: number;
+    original_page_number: number;
+  }>;
+  originalTotalPages: number;
+  selectedPageRangeLabel: string;
+  forceOcr: boolean;
 }
 
 export interface CreateGenerationTaskInput {
@@ -35,6 +43,12 @@ export function useCreateGenerationTask() {
               page_number: page.pageNumber,
               image_data_url: page.imageDataUrl,
             })),
+            selected_original_page_numbers: item.selectedOriginalPageNumbers,
+            uploaded_page_number_mapping: item.uploadedPageNumberMapping,
+            original_total_pages: item.originalTotalPages,
+            selected_page_count: item.selectedOriginalPageNumbers.length,
+            selected_page_range_label: item.selectedPageRangeLabel,
+            force_ocr: item.forceOcr,
           })),
         ),
       );

@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+﻿import { NextResponse } from 'next/server';
 import type { ExtractionParagraph } from '@/src/app/api/types/template-slot-extraction';
 import { getUserTemplateById } from '@/src/lib/data/templates-repository';
 import type {
@@ -13,12 +13,21 @@ import type { SlotReviewSessionPayload } from '@/src/lib/templates/slot-review-s
 
 interface UploadedFileMetadata {
   file_name?: string;
+  force_ocr?: boolean;
   parsed_pdf?: {
     pages?: Array<{ pageNumber?: number; text?: string }>;
     totalTextLength?: number;
     likelyScanned?: boolean;
   };
   vision_pages?: Array<{ page_number?: number; image_data_url?: string }>;
+  selected_original_page_numbers?: number[];
+  uploaded_page_number_mapping?: Array<{
+    uploaded_page_number?: number;
+    original_page_number?: number;
+  }>;
+  original_total_pages?: number;
+  selected_page_count?: number;
+  selected_page_range_label?: string;
 }
 
 function createUnauthorizedResponse() {
@@ -29,6 +38,30 @@ function createUnauthorizedResponse() {
     },
     { status: 401 },
   );
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (error && typeof error === 'object') {
+    if ('message' in error && typeof error.message === 'string') {
+      return error.message;
+    }
+
+    if ('error_description' in error && typeof error.error_description === 'string') {
+      return error.error_description;
+    }
+
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return '创建批量生成任务失败，请稍后重试。';
+    }
+  }
+
+  return '创建批量生成任务失败，请稍后重试。';
 }
 
 function sanitizeFileName(fileName: string) {
@@ -99,6 +132,43 @@ function normalizeVisionPages(metadata: UploadedFileMetadata | undefined): PdfVi
       page_number: page.page_number,
       image_data_url: page.image_data_url,
     }));
+}
+
+function normalizeSelectedOriginalPageNumbers(metadata: UploadedFileMetadata | undefined) {
+  const pageNumbers = metadata?.selected_original_page_numbers;
+
+  if (!Array.isArray(pageNumbers)) {
+    return [];
+  }
+
+  return pageNumbers
+    .filter((value): value is number => typeof value === 'number' && Number.isInteger(value) && value > 0)
+    .sort((left, right) => left - right);
+}
+
+function normalizeUploadedPageNumberMapping(metadata: UploadedFileMetadata | undefined) {
+  const mappings = metadata?.uploaded_page_number_mapping;
+
+  if (!Array.isArray(mappings)) {
+    return [];
+  }
+
+  return mappings
+    .filter(
+      (
+        entry,
+      ): entry is {
+        uploaded_page_number: number;
+        original_page_number: number;
+      } =>
+        typeof entry?.uploaded_page_number === 'number' &&
+        Number.isInteger(entry.uploaded_page_number) &&
+        entry.uploaded_page_number > 0 &&
+        typeof entry?.original_page_number === 'number' &&
+        Number.isInteger(entry.original_page_number) &&
+        entry.original_page_number > 0,
+    )
+    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
 }
 
 async function getAuthenticatedUser() {
@@ -174,10 +244,11 @@ export async function GET() {
       data: response,
     });
   } catch (error) {
+    const errorMessage = getErrorMessage(error);
     return NextResponse.json(
       {
         code: 'GENERATION_TASK_LIST_FAILED',
-        message: error instanceof Error ? error.message : '读取任务列表失败，请稍后重试。',
+        message: errorMessage,
       },
       { status: 500 },
     );
@@ -312,6 +383,8 @@ export async function POST(request: Request) {
         source_pdf_path: storagePath,
         status: 'uploaded',
         elapsed_seconds: 0,
+        slot_total_count: slotSchema.length,
+        slot_completed_count: 0,
         llm_input: {
           template_id: templateId,
           template_name: template.template_name,
@@ -324,6 +397,21 @@ export async function POST(request: Request) {
             typeof metadata?.parsed_pdf?.totalTextLength === 'number'
               ? metadata.parsed_pdf.totalTextLength
               : 0,
+          force_ocr: metadata?.force_ocr === true,
+          selected_original_page_numbers: normalizeSelectedOriginalPageNumbers(metadata),
+          uploaded_page_number_mapping: normalizeUploadedPageNumberMapping(metadata),
+          original_total_pages:
+            typeof metadata?.original_total_pages === 'number' && Number.isInteger(metadata.original_total_pages)
+              ? metadata.original_total_pages
+              : normalizeParsedPages(metadata).length,
+          selected_page_count:
+            typeof metadata?.selected_page_count === 'number' && Number.isInteger(metadata.selected_page_count)
+              ? metadata.selected_page_count
+              : normalizeParsedPages(metadata).length,
+          selected_page_range_label:
+            typeof metadata?.selected_page_range_label === 'string'
+              ? metadata.selected_page_range_label
+              : '',
         },
       });
     }
@@ -332,7 +420,7 @@ export async function POST(request: Request) {
       .from('generation_task_items')
       .insert(itemInsertPayloads)
       .select(
-        'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, created_at',
+        'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at',
       );
 
     if (itemsError || !items) {
@@ -371,21 +459,24 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
+    const errorMessage = getErrorMessage(error);
+
     await logEvent({
       ownerId: user.id,
       actorEmail: user.email ?? null,
       level: 'error',
       eventType: 'generation_task_create_failed',
-      message: error instanceof Error ? error.message : 'Failed to create generation task.',
+      message: errorMessage,
       route: '/api/generation-tasks',
     });
 
     return NextResponse.json(
       {
         code: 'GENERATION_TASK_CREATE_FAILED',
-        message: error instanceof Error ? error.message : '创建批量生成任务失败，请稍后重试。',
+        message: errorMessage,
       },
       { status: 500 },
     );
   }
 }
+

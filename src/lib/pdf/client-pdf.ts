@@ -18,6 +18,9 @@ export interface PdfVisionPageInput {
   imageDataUrl: string;
 }
 
+const OCR_RENDER_SCALE = 6.0;
+const OCR_IMAGE_FORMAT = 'image/png';
+
 const PDFJS_VERSION = '5.6.205';
 const PDFJS_CMAP_URL = `https://unpkg.com/pdfjs-dist@${PDFJS_VERSION}/cmaps/`;
 const PDFJS_STANDARD_FONT_DATA_URL = `https://unpkg.com/pdfjs-dist@${PDFJS_VERSION}/standard_fonts/`;
@@ -103,7 +106,7 @@ export async function renderPdfPagesForVision(
 
   for (const pageNumber of pageNumbers) {
     const page = await pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: 1 });
+    const viewport = page.getViewport({ scale: OCR_RENDER_SCALE });
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d');
 
@@ -122,7 +125,7 @@ export async function renderPdfPagesForVision(
 
     results.push({
       pageNumber,
-      imageDataUrl: canvas.toDataURL('image/jpeg', 0.78),
+      imageDataUrl: canvas.toDataURL(OCR_IMAGE_FORMAT),
     });
   }
 

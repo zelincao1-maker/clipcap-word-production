@@ -4,12 +4,12 @@ import { Badge, Box, Button, Group, Paper, Stack, Text, Textarea, Title } from '
 import { notifications } from '@mantine/notifications';
 import { useRouter } from 'next/navigation';
 import { startTransition, useEffect, useRef, useState } from 'react';
+import type { TemplateExtractionTaskResponse } from '@/src/app/api/types/template-extraction-task';
 import { isLoginGateBypassedForLocal } from '@/src/lib/auth/login-gate';
 import { parseDocxInBrowser } from '@/src/lib/docx/parse-browser';
 import { SLOT_REVIEW_SESSION_KEY } from '@/src/lib/templates/slot-review-session';
 import { openCompleteRegistrationModal } from '@/src/modals/complete-registration';
 import { openUsageGuideModal } from '@/src/modals/usage-guide';
-import { useExtractTemplateSlots } from '@/src/querys/use-extract-template-slots';
 import { useRegistrationGateStore } from '@/src/stores/registration-gate-store';
 
 function readFileAsBase64(file: File) {
@@ -36,6 +36,58 @@ function readFileAsBase64(file: File) {
   });
 }
 
+interface TemplateExtractionTaskSummary extends TemplateExtractionTaskResponse {}
+
+async function createTemplateExtractionTask(file: File, prompt: string) {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('prompt', prompt);
+
+  const response = await fetch('/api/template-extraction-tasks', {
+    method: 'POST',
+    body: formData,
+  });
+
+  const payload = (await response.json()) as {
+    message?: string;
+    data?: TemplateExtractionTaskSummary;
+  };
+
+  if (!response.ok || !payload.data) {
+    throw new Error(payload.message ?? '创建槽位抽取任务失败，请稍后重试。');
+  }
+
+  return payload.data;
+}
+
+async function fetchTemplateExtractionTask(taskId: string) {
+  const response = await fetch(`/api/template-extraction-tasks/${taskId}`, {
+    cache: 'no-store',
+  });
+
+  const payload = (await response.json()) as {
+    message?: string;
+    data?: TemplateExtractionTaskSummary;
+  };
+
+  if (!response.ok || !payload.data) {
+    throw new Error(payload.message ?? '读取槽位抽取任务失败，请稍后重试。');
+  }
+
+  return payload.data;
+}
+
+async function startTemplateExtractionTask(taskId: string) {
+  const response = await fetch(`/api/template-extraction-tasks/${taskId}/process`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json()) as { message?: string };
+    throw new Error(payload.message ?? '启动槽位抽取任务失败，请稍后重试。');
+  }
+}
+
 export function HomeHero() {
   const [prompt, setPrompt] = useState('');
   const [selectedDocxName, setSelectedDocxName] = useState('');
@@ -43,15 +95,23 @@ export function HomeHero() {
   const [authErrorMessage, setAuthErrorMessage] = useState('');
   const [processingSeconds, setProcessingSeconds] = useState(0);
   const [isSubmissionLocked, setIsSubmissionLocked] = useState(false);
+  const [activeExtractionTask, setActiveExtractionTask] =
+    useState<TemplateExtractionTaskSummary | null>(null);
 
-  const docxInputRef = useRef<HTMLInputElement | null>(null);
+  const parsedDocumentPromiseRef = useRef<ReturnType<typeof parseDocxInBrowser> | null>(null);
+  const uploadDocxBase64PromiseRef = useRef<Promise<string> | null>(null);
+  const processKickoffInFlightRef = useRef(false);
+  const hasHandledTaskCompletionRef = useRef(false);
+
   const router = useRouter();
   const { isAuthenticated, registrationStatus, signOut } = useRegistrationGateStore();
-  const extractTemplateSlotsMutation = useExtractTemplateSlots();
 
   const isLoginBypassed = isLoginGateBypassedForLocal();
   const canUseProtectedActions = isLoginBypassed || isAuthenticated;
-  const isProcessingTemplate = isSubmissionLocked || extractTemplateSlotsMutation.isPending;
+  const isProcessingTemplate =
+    isSubmissionLocked ||
+    (activeExtractionTask !== null &&
+      (activeExtractionTask.status === 'pending' || activeExtractionTask.status === 'running'));
   const canEditPrompt = canUseProtectedActions && !isProcessingTemplate;
   const hasUploadedDocx = Boolean(selectedDocxFile);
 
@@ -106,9 +166,14 @@ export function HomeHero() {
   }, [isProcessingTemplate]);
 
   useEffect(() => {
-    if (!isProcessingTemplate) {
+    if (!isProcessingTemplate || !activeExtractionTask) {
       return;
     }
+
+    const progressText =
+      activeExtractionTask.total_paragraphs > 0
+        ? `${activeExtractionTask.completed_paragraphs}/${activeExtractionTask.total_paragraphs} 段`
+        : '正在准备段落';
 
     notifications.update({
       id: 'template-slot-extraction',
@@ -117,9 +182,9 @@ export function HomeHero() {
       withCloseButton: false,
       color: 'teal',
       title: '正在处理模板',
-      message: `正在调用 LLM 识别槽位，请稍候。已处理 ${processingSeconds} 秒`,
+      message: `正在调用 LLM 识别槽位，请稍候。已处理 ${processingSeconds} 秒，当前进度 ${progressText}。`,
     });
-  }, [isProcessingTemplate, processingSeconds]);
+  }, [activeExtractionTask, isProcessingTemplate, processingSeconds]);
 
   const requireRegistration = (sourceAction: string, onReady?: () => void) => {
     if (sourceAction.includes('DOCX')) {
@@ -140,6 +205,153 @@ export function HomeHero() {
     openCompleteRegistrationModal({ sourceAction });
   };
 
+  const resetExtractionTaskState = () => {
+    setActiveExtractionTask(null);
+    setIsSubmissionLocked(false);
+    setProcessingSeconds(0);
+    processKickoffInFlightRef.current = false;
+  };
+
+  const ensureTaskProcessing = async (taskId: string) => {
+    if (processKickoffInFlightRef.current) {
+      return;
+    }
+
+    processKickoffInFlightRef.current = true;
+
+    try {
+      await startTemplateExtractionTask(taskId);
+    } catch {
+      // Keep polling; the next poll can retry kicking off the task if it is still pending.
+    } finally {
+      processKickoffInFlightRef.current = false;
+    }
+  };
+
+  const handleCompletedTask = async (task: TemplateExtractionTaskSummary) => {
+    if (hasHandledTaskCompletionRef.current) {
+      return;
+    }
+
+    hasHandledTaskCompletionRef.current = true;
+
+    try {
+      const [parsedDocument, uploadDocxBase64] = await Promise.all([
+        parsedDocumentPromiseRef.current ??
+          Promise.reject(new Error('当前会话缺少 DOCX 预览数据，请重新上传后再试。')),
+        uploadDocxBase64PromiseRef.current ??
+          Promise.reject(new Error('当前会话缺少原始 DOCX 文件，请重新上传后再试。')),
+      ]);
+
+      if (!task.result) {
+        throw new Error('槽位抽取任务已完成，但缺少抽取结果。');
+      }
+
+      window.sessionStorage.setItem(
+        SLOT_REVIEW_SESSION_KEY,
+        JSON.stringify({
+          templateId: undefined,
+          templateName: undefined,
+          fileName: task.source_docx_name,
+          uploadDocxName: task.source_docx_name,
+          uploadDocxBase64,
+          prompt: task.prompt,
+          uploadText: task.upload_text ?? '',
+          uploadHtml: task.upload_html ?? '',
+          parsedDocument,
+          documentInfo: task.result.document_info,
+          extractionResult: task.result.extraction_result,
+        }),
+      );
+
+      notifications.update({
+        id: 'template-slot-extraction',
+        autoClose: 1800,
+        color: 'teal',
+        loading: false,
+        title: '处理完成',
+        message: '槽位识别完成，正在打开编辑页面。',
+        withCloseButton: true,
+      });
+
+      notifications.hide('template-slot-extraction');
+      resetExtractionTaskState();
+
+      startTransition(() => {
+        router.push('/documents/slot-review');
+      });
+    } catch (error) {
+      notifications.update({
+        id: 'template-slot-extraction',
+        autoClose: 3000,
+        color: 'red',
+        loading: false,
+        title: '处理失败',
+        message: error instanceof Error ? error.message : '槽位识别失败，请稍后重试。',
+        withCloseButton: true,
+      });
+
+      hasHandledTaskCompletionRef.current = false;
+      resetExtractionTaskState();
+    }
+  };
+
+  useEffect(() => {
+    if (!activeExtractionTask) {
+      return;
+    }
+
+    if (activeExtractionTask.status === 'completed') {
+      void handleCompletedTask(activeExtractionTask);
+      return;
+    }
+
+    if (activeExtractionTask.status === 'failed') {
+      notifications.update({
+        id: 'template-slot-extraction',
+        autoClose: 3000,
+        color: 'red',
+        loading: false,
+        title: '处理失败',
+        message: activeExtractionTask.error_message ?? '槽位识别失败，请稍后重试。',
+        withCloseButton: true,
+      });
+
+      resetExtractionTaskState();
+      return;
+    }
+
+    let isDisposed = false;
+
+    const pollTask = async () => {
+      try {
+        if (activeExtractionTask.status === 'pending') {
+          void ensureTaskProcessing(activeExtractionTask.id);
+        }
+
+        const nextTask = await fetchTemplateExtractionTask(activeExtractionTask.id);
+
+        if (!isDisposed) {
+          setActiveExtractionTask(nextTask);
+        }
+      } catch {
+        if (!isDisposed && activeExtractionTask.status === 'pending') {
+          void ensureTaskProcessing(activeExtractionTask.id);
+        }
+      }
+    };
+
+    void pollTask();
+    const intervalId = window.setInterval(() => {
+      void pollTask();
+    }, 2000);
+
+    return () => {
+      isDisposed = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeExtractionTask, router]);
+
   const handleStartSlotDetection = () => {
     if (isProcessingTemplate) {
       return;
@@ -158,6 +370,9 @@ export function HomeHero() {
       const notificationId = 'template-slot-extraction';
       setProcessingSeconds(0);
       setIsSubmissionLocked(true);
+      hasHandledTaskCompletionRef.current = false;
+      parsedDocumentPromiseRef.current = parseDocxInBrowser(selectedDocxFile);
+      uploadDocxBase64PromiseRef.current = readFileAsBase64(selectedDocxFile);
 
       notifications.show({
         id: notificationId,
@@ -165,57 +380,16 @@ export function HomeHero() {
         autoClose: false,
         withCloseButton: false,
         color: 'teal',
-        title: '正在处理模板',
-        message: '正在调用 LLM 识别槽位，请稍候。已处理 0 秒',
+        title: '正在创建抽取任务',
+        message: '模板已上传，正在创建槽位抽取任务，请稍候。',
       });
 
       try {
-        const [parsedDocument, uploadDocxBase64] = await Promise.all([
-          parseDocxInBrowser(selectedDocxFile),
-          readFileAsBase64(selectedDocxFile),
-        ]);
-
-        const result = await extractTemplateSlotsMutation.mutateAsync({
-          file: selectedDocxFile,
-          prompt,
-        });
-
-        window.sessionStorage.setItem(
-          SLOT_REVIEW_SESSION_KEY,
-          JSON.stringify({
-            templateId: undefined,
-            templateName: undefined,
-            fileName: result.file_name,
-            uploadDocxName: selectedDocxFile.name,
-            uploadDocxBase64,
-            prompt: result.prompt,
-            uploadText: result.upload_text,
-            uploadHtml: result.upload_html,
-            parsedDocument,
-            documentInfo: result.document_info,
-            extractionResult: result.extraction_result,
-          }),
-        );
-
-        notifications.update({
-          id: notificationId,
-          autoClose: 1800,
-          color: 'teal',
-          loading: false,
-          title: '处理完成',
-          message: '槽位识别完成，正在打开编辑页面。',
-          withCloseButton: true,
-        });
-
-        notifications.hide(notificationId);
-
-        startTransition(() => {
-          router.push('/documents/slot-review');
-        });
-      } catch (error) {
-        setProcessingSeconds(0);
+        const task = await createTemplateExtractionTask(selectedDocxFile, prompt);
+        setActiveExtractionTask(task);
         setIsSubmissionLocked(false);
-
+        void ensureTaskProcessing(task.id);
+      } catch (error) {
         notifications.update({
           id: notificationId,
           autoClose: 3000,
@@ -225,6 +399,8 @@ export function HomeHero() {
           message: error instanceof Error ? error.message : '槽位识别失败，请稍后重试。',
           withCloseButton: true,
         });
+
+        resetExtractionTaskState();
       }
     });
   };
@@ -368,7 +544,6 @@ export function HomeHero() {
               id="home-docx-upload-input"
               accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               disabled={isProcessingTemplate}
-              ref={docxInputRef}
               type="file"
               onChange={(event) => {
                 setSelectedDocxName(event.currentTarget.files?.[0]?.name ?? '');
