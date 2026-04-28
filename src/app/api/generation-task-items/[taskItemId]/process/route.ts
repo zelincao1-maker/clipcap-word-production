@@ -351,6 +351,19 @@ async function runGenerationTaskItemProcess(params: {
       );
     }
 
+    const llmStartMessage =
+      `即将开始 LLM 抽取：PDF=${params.item.source_pdf_name}，` +
+      `槽位数=${slotSchema.length}，文本页=${pages.length}，OCR页图=${visionPages.length}。`;
+    console.log('[Generation Task Item] LLM extraction starting', {
+      taskItemId: params.item.id,
+      taskId: params.item.task_id,
+      sourcePdfName: params.item.source_pdf_name,
+      slotCount: slotSchema.length,
+      textPageCount: pages.length,
+      visionPageCount: visionPages.length,
+    });
+    await appendProcessingTrace(admin, params.item.id, llmStartMessage);
+
     let lastLoggedCompletedSlots = -1;
 
     const llmOutput = await fillTemplateSlotsFromPdf({

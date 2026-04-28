@@ -126,6 +126,12 @@ export function useTemplateGenerationTasks(enabled = true) {
 export function useProcessGenerationTaskItem() {
   return useMutation({
     mutationFn: async (taskItemId: string) => {
+      console.log('[Generation Task Item] Process request', {
+        taskItemId,
+        route: `/api/generation-task-items/${taskItemId}/process`,
+        method: 'POST',
+      });
+
       const response = await fetch(`/api/generation-task-items/${taskItemId}/process`, {
         method: 'POST',
       });
@@ -159,7 +165,7 @@ export function useProcessGenerationTaskItem() {
         throw new Error(errorMessage);
       }
 
-      console.info('[Generation Task Item] Process response', {
+      console.log('[Generation Task Item] Process response', {
         status: response.status,
         statusText: response.statusText,
         taskItemId,
