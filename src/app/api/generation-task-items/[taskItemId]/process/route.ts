@@ -545,10 +545,25 @@ export async function POST(
       { status: 202 },
     );
   } catch (error) {
+    const { taskItemId } = await context.params;
+    const message =
+      error instanceof Error ? error.message : 'PDF ?????????????';
+
+    await logEvent({
+      ownerId: user.id,
+      actorEmail: user.email ?? null,
+      level: 'error',
+      eventType: 'generation_task_item_process_request_failed',
+      message,
+      route: '/api/generation-task-items/[taskItemId]/process',
+      taskItemId,
+      payload: buildErrorLogPayload(error),
+    });
+
     return NextResponse.json(
       {
         code: 'GENERATION_TASK_ITEM_PROCESS_FAILED',
-        message: error instanceof Error ? error.message : 'PDF 填充处理失败，请稍后重试。',
+        message,
       },
       { status: 500 },
     );

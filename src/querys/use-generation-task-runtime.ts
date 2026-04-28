@@ -8,6 +8,73 @@ import type {
   GenerationTemplateTaskListResponse,
 } from '@/src/app/api/types/generation-task';
 
+async function reportClientError(input: {
+  eventType: string;
+  message: string;
+  route: string;
+  taskId?: string | null;
+  taskItemId?: string | null;
+  payload?: Record<string, unknown>;
+}) {
+  try {
+    await fetch('/api/client-logs', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        level: 'error',
+        eventType: input.eventType,
+        message: input.message,
+        route: input.route,
+        taskId: input.taskId ?? null,
+        taskItemId: input.taskItemId ?? null,
+        payload: input.payload ?? {},
+      }),
+    });
+  } catch (error) {
+    console.error('[Client Log] Failed to report frontend runtime error', {
+      eventType: input.eventType,
+      message: input.message,
+      error,
+    });
+  }
+}
+
+async function parseApiPayload<T>(
+  response: Response,
+): Promise<{
+  payload: T | null;
+  message: string | null;
+}> {
+  const contentType = response.headers.get('content-type') ?? '';
+  const rawText = await response.text();
+
+  if (!rawText) {
+    return { payload: null, message: null };
+  }
+
+  if (contentType.includes('application/json')) {
+    try {
+      const payload = JSON.parse(rawText) as T & { message?: string };
+      return {
+        payload,
+        message:
+          typeof payload === 'object' &&
+          payload !== null &&
+          'message' in payload &&
+          typeof payload.message === 'string'
+            ? payload.message
+            : null,
+      };
+    } catch {
+      return { payload: null, message: rawText };
+    }
+  }
+
+  return { payload: null, message: rawText };
+}
+
 export function useGenerationTask(taskId: string | null) {
   return useQuery({
     queryKey: ['generation-task', taskId],
@@ -22,13 +89,13 @@ export function useGenerationTask(taskId: string | null) {
     },
     queryFn: async () => {
       const response = await fetch(`/api/generation-tasks/${taskId}`);
-      const payload = (await response.json()) as {
+      const { payload, message } = await parseApiPayload<{
         message?: string;
         data?: GenerationTaskDetailResponse;
-      };
+      }>(response);
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '读取批量生成任务失败，请稍后重试。');
+      if (!response.ok || !payload?.data) {
+        throw new Error(message ?? '读取批量生成任务失败，请稍后重试。');
       }
 
       return payload.data;
@@ -42,13 +109,13 @@ export function useTemplateGenerationTasks(enabled = true) {
     enabled,
     queryFn: async () => {
       const response = await fetch('/api/generation-tasks');
-      const payload = (await response.json()) as {
+      const { payload, message } = await parseApiPayload<{
         message?: string;
         data?: GenerationTemplateTaskListResponse;
-      };
+      }>(response);
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '读取模板任务列表失败，请稍后重试。');
+      if (!response.ok || !payload?.data) {
+        throw new Error(message ?? '读取模板任务列表失败，请稍后重试。');
       }
 
       return payload.data;
@@ -62,15 +129,34 @@ export function useProcessGenerationTaskItem() {
       const response = await fetch(`/api/generation-task-items/${taskItemId}/process`, {
         method: 'POST',
       });
-      const payload = (await response.json()) as {
+      const { payload, message } = await parseApiPayload<{
         message?: string;
         data?: {
           item: GenerationTaskItemSummary;
         };
-      };
+      }>(response);
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? 'PDF 填充处理失败，请稍后重试。');
+      if (!response.ok || !payload?.data) {
+        const errorMessage = message ?? 'PDF 填充处理失败，请稍后重试。';
+        console.error('[Generation Task Item] Process failed', {
+          status: response.status,
+          statusText: response.statusText,
+          taskItemId,
+          message: errorMessage,
+        });
+
+        await reportClientError({
+          eventType: 'generation_task_item_process_failed_frontend',
+          message: errorMessage,
+          route: '/api/generation-task-items/[taskItemId]/process',
+          taskItemId,
+          payload: {
+            status: response.status,
+            statusText: response.statusText,
+          },
+        });
+
+        throw new Error(errorMessage);
       }
 
       return payload.data;
@@ -84,13 +170,13 @@ export function useGenerationTaskItem(taskItemId: string | null) {
     enabled: Boolean(taskItemId),
     queryFn: async () => {
       const response = await fetch(`/api/generation-task-items/${taskItemId}`);
-      const payload = (await response.json()) as {
+      const { payload, message } = await parseApiPayload<{
         message?: string;
         data?: GenerationTaskItemDetailResponse;
-      };
+      }>(response);
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '读取任务详情失败，请稍后重试。');
+      if (!response.ok || !payload?.data) {
+        throw new Error(message ?? '读取任务详情失败，请稍后重试。');
       }
 
       return payload.data;
@@ -111,13 +197,13 @@ export function useReviewGenerationTaskItem() {
         }),
       });
 
-      const payload = (await response.json()) as {
+      const { payload, message } = await parseApiPayload<{
         message?: string;
         data?: GenerationTaskItemDetailResponse;
-      };
+      }>(response);
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '保存核查结果失败，请稍后重试。');
+      if (!response.ok || !payload?.data) {
+        throw new Error(message ?? '保存核查结果失败，请稍后重试。');
       }
 
       return payload.data;
