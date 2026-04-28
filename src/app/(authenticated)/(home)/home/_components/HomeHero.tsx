@@ -505,7 +505,7 @@ export function HomeHero() {
                 isProcessingTemplate
                   ? 'LLM 正在识别模板槽位，暂时无法编辑任务描述。'
                   : canEditPrompt
-                    ? '描述你的任务，例如：请从一批 PDF 中提取企业名称、金额、日期，并自动填充到对应文档模板。'
+                    ? '描述你的任务，例如：请从一批 PDF 中提取企业名称、汽车品牌，并自动填充到对应文档模板。'
                     : '登录后即可输入任务描述'
               }
               readOnly={!canEditPrompt}
