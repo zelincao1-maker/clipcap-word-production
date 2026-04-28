@@ -588,24 +588,6 @@ export function BatchGenerateModal({
 
           const selectedOriginalPageNumbers = rowSelectionState.selectedPageNumbers;
           const selectedPageSet = new Set(selectedOriginalPageNumbers);
-          const selectedParsedPages = parsedPdf.pages.filter((page) =>
-            selectedPageSet.has(page.pageNumber),
-          );
-          const selectedTotalTextLength = selectedParsedPages.reduce(
-            (sum, page) => sum + page.text.length,
-            0,
-          );
-          const selectedLikelyScanned = true;
-          const remappedParsedPdf = {
-            ...parsedPdf,
-            pages: selectedParsedPages.map((page, index) => ({
-              pageNumber: index + 1,
-              text: page.text,
-            })),
-            fullText: selectedParsedPages.map((page) => page.text).join('\n'),
-            totalTextLength: selectedTotalTextLength,
-            likelyScanned: selectedLikelyScanned,
-          };
           const uploadedPageNumberMapping = selectedOriginalPageNumbers.map(
             (originalPageNumber, index) => ({
               uploaded_page_number: index + 1,
@@ -615,13 +597,12 @@ export function BatchGenerateModal({
 
           return {
             file,
-            parsedPdf: remappedParsedPdf,
             selectedOriginalPageNumbers,
             uploadedPageNumberMapping,
             originalTotalPages: parsedPdf.pages.length,
-            forceOcr: false,
+            forceOcr: true,
             selectedPageRangeLabel:
-              rowSelectionState.selectedPageRangeLabel || '全部页面',
+              rowSelectionState.selectedPageRangeLabel || '',
           };
         }),
       );
