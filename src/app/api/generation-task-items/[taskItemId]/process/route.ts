@@ -222,14 +222,21 @@ async function runGenerationTaskItemProcess(params: {
     : [];
   const pages = normalizePages(params.item.llm_input?.pages);
   const precomputedVisionPages = normalizeVisionPages(params.item.llm_input?.vision_pages);
+  const selectedOriginalPageNumbers = normalizeSelectedOriginalPageNumbers(
+    params.item.llm_input?.selected_original_page_numbers,
+  );
 
   try {
     if (slotSchema.length === 0) {
       throw new Error('当前模板缺少槽位定义，请重新保存模板后再试。');
     }
 
-    if (pages.length === 0 && precomputedVisionPages.length === 0) {
-      throw new Error('当前任务缺少 PDF 预处理结果，请重新创建批量任务后再试。');
+    if (
+      pages.length === 0 &&
+      precomputedVisionPages.length === 0 &&
+      selectedOriginalPageNumbers.length === 0
+    ) {
+      throw new Error('?????????? PDF ??????????????????');
     }
 
     await admin
