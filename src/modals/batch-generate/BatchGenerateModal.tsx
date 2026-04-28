@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import {
   Badge,
@@ -20,10 +20,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationTaskItemSummary } from '@/src/app/api/types/generation-task';
 import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
-import {
-  parsePdf,
-  renderPdfPagesForVision,
-} from '@/src/lib/pdf/client-pdf';
+import { parsePdf } from '@/src/lib/pdf/client-pdf';
 import {
   useGenerationTask,
   useProcessGenerationTaskItem,
@@ -609,38 +606,6 @@ export function BatchGenerateModal({
             totalTextLength: selectedTotalTextLength,
             likelyScanned: selectedLikelyScanned,
           };
-          const selectedVisionPageNumbers = selectedOriginalPageNumbers;
-          const visionPages =
-            selectedVisionPageNumbers.length > 0
-              ? await renderPdfPagesForVision(file, selectedVisionPageNumbers)
-              : [];
-          const ocrImageDebugEntries = visionPages.map((page, index) => ({
-            fileName: file.name,
-            originalPageNumber: selectedOriginalPageNumbers[index] ?? page.pageNumber,
-            uploadedPageNumber: index + 1,
-            previewUrl: dataUrlToObjectUrl(page.imageDataUrl),
-            imageDataUrl: page.imageDataUrl,
-          }));
-
-          window.clipcapOcrImages?.forEach((entry) => {
-            URL.revokeObjectURL(entry.previewUrl);
-          });
-          window.clipcapOcrImages = ocrImageDebugEntries;
-
-          if (ocrImageDebugEntries.length > 0) {
-            console.info(
-              `[Batch Generate][${file.name}] OCR images prepared: ${ocrImageDebugEntries.length} page(s). Use window.clipcapOcrImages in the browser console, or run window.open(window.clipcapOcrImages[0].previewUrl).`,
-            );
-            ocrImageDebugEntries.forEach((entry) => {
-              console.info(
-                `[Batch Generate][${file.name}][OCR Image] uploaded page ${entry.uploadedPageNumber}, original PDF page ${entry.originalPageNumber}: ${entry.previewUrl}`,
-              );
-            });
-          }
-          const remappedVisionPages = visionPages.map((page, index) => ({
-            pageNumber: index + 1,
-            imageDataUrl: page.imageDataUrl,
-          }));
           const uploadedPageNumberMapping = selectedOriginalPageNumbers.map(
             (originalPageNumber, index) => ({
               uploaded_page_number: index + 1,
@@ -651,7 +616,6 @@ export function BatchGenerateModal({
           return {
             file,
             parsedPdf: remappedParsedPdf,
-            visionPages: remappedVisionPages,
             selectedOriginalPageNumbers,
             uploadedPageNumberMapping,
             originalTotalPages: parsedPdf.pages.length,

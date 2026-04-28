@@ -6,6 +6,7 @@ import type {
 } from '@/src/lib/llm/fill-template-from-pdf';
 import { fillTemplateSlotsFromPdf } from '@/src/lib/llm/fill-template-from-pdf';
 import { buildErrorLogPayload, logEvent } from '@/src/lib/logging/log-event';
+import { renderPdfPagesForVisionOnServer } from '@/src/lib/pdf/server-pdf';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
@@ -49,6 +50,7 @@ type GenerationTaskItemRecord = {
     likely_scanned?: boolean;
     total_text_length?: number;
     force_ocr?: boolean;
+    selected_original_page_numbers?: number[];
   } | null;
 };
 
@@ -98,6 +100,45 @@ function normalizeVisionPages(value: unknown): PdfVisionPageInput[] {
       typeof (page as PdfVisionPageInput).page_number === 'number' &&
       typeof (page as PdfVisionPageInput).image_data_url === 'string',
   );
+}
+
+function normalizeSelectedOriginalPageNumbers(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(
+    (pageNumber): pageNumber is number =>
+      typeof pageNumber === 'number' && Number.isInteger(pageNumber) && pageNumber > 0,
+  );
+}
+
+async function buildVisionPagesForTaskItem(params: {
+  admin: AdminClient;
+  item: GenerationTaskItemRecord;
+}) {
+  const originalPageNumbers = normalizeSelectedOriginalPageNumbers(
+    params.item.llm_input?.selected_original_page_numbers,
+  );
+
+  if (originalPageNumbers.length === 0) {
+    return [];
+  }
+
+  const { data: fileBlob, error } = await params.admin.storage
+    .from('generation-pdfs')
+    .download(params.item.source_pdf_path);
+
+  if (error || !fileBlob) {
+    throw error ?? new Error('Unable to download the original PDF for OCR.');
+  }
+
+  const arrayBuffer = await fileBlob.arrayBuffer();
+
+  return renderPdfPagesForVisionOnServer({
+    pdfBytes: new Uint8Array(arrayBuffer),
+    originalPageNumbers,
+  });
 }
 
 async function recalculateTaskSummary(admin: AdminClient, taskId: string) {
@@ -180,14 +221,14 @@ async function runGenerationTaskItemProcess(params: {
     ? params.item.llm_input?.slot_schema
     : [];
   const pages = normalizePages(params.item.llm_input?.pages);
-  const visionPages = normalizeVisionPages(params.item.llm_input?.vision_pages);
+  const precomputedVisionPages = normalizeVisionPages(params.item.llm_input?.vision_pages);
 
   try {
     if (slotSchema.length === 0) {
       throw new Error('当前模板缺少槽位定义，请重新保存模板后再试。');
     }
 
-    if (pages.length === 0 && visionPages.length === 0) {
+    if (pages.length === 0 && precomputedVisionPages.length === 0) {
       throw new Error('当前任务缺少 PDF 预处理结果，请重新创建批量任务后再试。');
     }
 
@@ -231,11 +272,25 @@ async function runGenerationTaskItemProcess(params: {
       payload: {
         slotCount: slotSchema.length,
         pageCount: pages.length,
-        visionPageCount: visionPages.length,
+        visionPageCount: precomputedVisionPages.length,
         likelyScanned: params.item.llm_input?.likely_scanned === true,
         forceOcr: params.item.llm_input?.force_ocr === true,
       },
     });
+
+    const visionPages =
+      precomputedVisionPages.length > 0
+        ? precomputedVisionPages
+        : await buildVisionPagesForTaskItem({
+            admin,
+            item: params.item,
+          });
+
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `已在后台准备 OCR 页图 ${visionPages.length} 页。`,
+    );
 
     let lastLoggedCompletedSlots = -1;
 
@@ -382,7 +437,7 @@ async function runGenerationTaskItemProcess(params: {
         sourcePdfName: params.item.source_pdf_name,
         slotCount: slotSchema.length,
         pageCount: pages.length,
-        visionPageCount: visionPages.length,
+        visionPageCount: precomputedVisionPages.length,
         likelyScanned: params.item.llm_input?.likely_scanned === true,
       }),
     });

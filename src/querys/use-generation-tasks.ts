@@ -2,15 +2,11 @@
 
 import { useMutation } from '@tanstack/react-query';
 import type { CreateGenerationTaskResponse } from '@/src/app/api/types/generation-task';
-import type {
-  ParsedPdfDocument,
-  PdfVisionPageInput,
-} from '@/src/lib/pdf/client-pdf';
+import type { ParsedPdfDocument } from '@/src/lib/pdf/client-pdf';
 
 export interface CreateGenerationTaskFileInput {
   file: File;
   parsedPdf: ParsedPdfDocument;
-  visionPages: PdfVisionPageInput[];
   selectedOriginalPageNumbers: number[];
   uploadedPageNumberMapping: Array<{
     uploaded_page_number: number;
@@ -39,10 +35,6 @@ export function useCreateGenerationTask() {
           input.files.map((item) => ({
             file_name: item.file.name,
             parsed_pdf: item.parsedPdf,
-            vision_pages: item.visionPages.map((page) => ({
-              page_number: page.pageNumber,
-              image_data_url: page.imageDataUrl,
-            })),
             selected_original_page_numbers: item.selectedOriginalPageNumbers,
             uploaded_page_number_mapping: item.uploadedPageNumberMapping,
             original_total_pages: item.originalTotalPages,
