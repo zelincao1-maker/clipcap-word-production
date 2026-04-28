@@ -719,6 +719,7 @@ async function extractTextFromVisionPages(input: {
       () => controller.abort(),
       requestTimeoutMs,
     );
+    let heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
 
     try {
       const batchLabel =
@@ -734,6 +735,14 @@ async function extractTextFromVisionPages(input: {
           .join('; ')}).`;
       console.info(batchStartedMessage);
       await input.onTrace?.({ message: batchStartedMessage });
+      heartbeatIntervalId = setInterval(() => {
+        const elapsedMs = Date.now() - batchStartedAt;
+        const heartbeatMessage =
+          `[PDF Fill][OCR] Waiting on ${batchLabel} for ${input.documentName} ` +
+          `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}).`;
+        console.info(heartbeatMessage);
+        void input.onTrace?.({ message: heartbeatMessage });
+      }, 15000);
 
       const content: Array<
         | { type: 'image_url'; image_url: { url: string } }
@@ -876,6 +885,9 @@ async function extractTextFromVisionPages(input: {
 
       await sleep(2000 * attempt);
     } finally {
+      if (heartbeatIntervalId) {
+        clearInterval(heartbeatIntervalId);
+      }
       clearTimeout(timeoutId);
     }
   }
