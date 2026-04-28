@@ -178,6 +178,18 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
             });
 
           if (ocrUploadError) {
+            console.error('[Generation Task][OCR Image Upload] Failed', {
+              fileName: item.file.name,
+              uploadedPageNumber,
+              originalPageNumber,
+              storagePath: ocrImageStoragePath,
+              contentType: imageBlob.type || 'application/octet-stream',
+              size: imageBlob.size,
+              error: {
+                name: ocrUploadError.name,
+                message: ocrUploadError.message,
+              },
+            });
             throw new Error(`上传 OCR 页图到存储失败：${ocrUploadError.message}`);
           }
 
@@ -207,7 +219,37 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
 export function useCreateGenerationTask() {
   return useMutation({
     mutationFn: async (input: CreateGenerationTaskInput) => {
-      const uploadedFileMetadatas = await uploadFilesToSupabase(input);
+      let uploadedFileMetadatas;
+
+      try {
+        uploadedFileMetadatas = await uploadFilesToSupabase(input);
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : '上传 PDF 或 OCR 图片到存储失败。';
+
+        console.error('[Generation Task] Staging upload failed', {
+          message: errorMessage,
+          templateId: input.templateId,
+          templateName: input.templateName,
+          fileCount: input.files.length,
+          fileNames: input.files.map((item) => item.file.name),
+        });
+
+        await reportClientError({
+          eventType: 'generation_task_staging_upload_failed_frontend',
+          message: errorMessage,
+          route: '/api/generation-tasks',
+          templateId: input.templateId,
+          payload: {
+            templateName: input.templateName,
+            fileCount: input.files.length,
+            fileNames: input.files.map((item) => item.file.name),
+          },
+        });
+
+        throw error instanceof Error ? error : new Error(errorMessage);
+      }
+
       const formData = new FormData();
       formData.append('templateId', input.templateId);
       formData.append('templateName', input.templateName);
