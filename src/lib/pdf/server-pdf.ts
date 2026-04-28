@@ -8,6 +8,8 @@ const OCR_RENDER_SCALE = 6.0;
 const OCR_IMAGE_FORMAT = 'image/png';
 const VENDORED_CANVAS_MODULE_PATH = path.join(
   process.cwd(),
+  'src',
+  'generated',
   'vendor-runtime',
   'napi-rs-runtime',
   'node_modules',

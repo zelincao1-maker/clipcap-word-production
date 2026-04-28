@@ -6,7 +6,8 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 const projectRoot = process.cwd();
-const vendorRoot = path.join(projectRoot, 'vendor-runtime', 'napi-rs-runtime');
+const legacyVendorRoot = path.join(projectRoot, 'vendor-runtime', 'napi-rs-runtime');
+const vendorRoot = path.join(projectRoot, 'src', 'generated', 'vendor-runtime', 'napi-rs-runtime');
 const vendorScopeRoot = path.join(vendorRoot, 'node_modules', '@napi-rs');
 
 async function copyPackage(packageName) {
@@ -24,6 +25,7 @@ async function copyPackage(packageName) {
 }
 
 async function main() {
+  await fs.rm(legacyVendorRoot, { recursive: true, force: true });
   await fs.rm(vendorRoot, { recursive: true, force: true });
   await fs.mkdir(vendorScopeRoot, { recursive: true });
 
