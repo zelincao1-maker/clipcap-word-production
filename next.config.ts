@@ -5,6 +5,7 @@ import type { NextConfig } from 'next';
 const workspaceRoot = path.dirname(fileURLToPath(import.meta.url));
 
 const nextConfig: NextConfig = {
+  serverExternalPackages: ['@napi-rs/canvas'],
   turbopack: {
     root: workspaceRoot,
   },
