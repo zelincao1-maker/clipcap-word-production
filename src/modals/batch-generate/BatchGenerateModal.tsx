@@ -595,6 +595,10 @@ export function BatchGenerateModal({
         const slotFillPromptPreviewMatch = line.match(
           /^(?:\[PDF Fill\])?\[TextPromptPreview\]\[(.+)\] (.+)$/,
         );
+        const errorDetailsMatch = line.match(
+          /^\[PDF Fill\]\[(OCR|Text)\]\[ErrorDetails\]\[(.+)\] (.+)$/,
+        );
+        const routeErrorDetailsMatch = line.match(/^\[RouteErrorDetails\]\[(.+)\] (.+)$/);
 
         if (ocrPageDataMatch) {
           const uploadedPageNumber = Number(ocrPageDataMatch[1]);
@@ -726,6 +730,32 @@ export function BatchGenerateModal({
               parsedPrompt.route ?? '/api/generation-task-items/[taskItemId]/slot-fill'
             } (${label})`,
             parsedPrompt,
+          );
+          return;
+        }
+
+        if (errorDetailsMatch) {
+          const scope = errorDetailsMatch[1] ?? 'Unknown';
+          const label = errorDetailsMatch[2] ?? 'Unknown';
+          const parsedDetails = JSON.parse(errorDetailsMatch[3] ?? '{}') as Record<string, unknown>;
+
+          console.error(
+            `[Batch Generate][${item.source_pdf_name}] ${scope} error details (${label})`,
+            parsedDetails,
+          );
+          return;
+        }
+
+        if (routeErrorDetailsMatch) {
+          const scope = routeErrorDetailsMatch[1] ?? 'Unknown';
+          const parsedDetails = JSON.parse(routeErrorDetailsMatch[2] ?? '{}') as Record<
+            string,
+            unknown
+          >;
+
+          console.error(
+            `[Batch Generate][${item.source_pdf_name}] Route error details (${scope})`,
+            parsedDetails,
           );
           return;
         }

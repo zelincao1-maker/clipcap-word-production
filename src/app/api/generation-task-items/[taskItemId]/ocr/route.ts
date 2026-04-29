@@ -264,6 +264,19 @@ async function runGenerationTaskItemOcr(params: {
       params.item.id,
       `OCR 失败，已转为人工核查：${getErrorMessage(error)}`,
     );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `[RouteErrorDetails][OCR] ${JSON.stringify(
+        buildErrorLogPayload(error, {
+          sourcePdfName: params.item.source_pdf_name,
+          slotCount: slotSchema.length,
+          pageCount: pages.length,
+          visionPageCount: precomputedVisionPages.length,
+          ocrImageAssetCount: ocrImageAssets.length,
+        }),
+      )}`,
+    );
 
     await recalculateTaskSummary(admin, params.item.task_id);
 

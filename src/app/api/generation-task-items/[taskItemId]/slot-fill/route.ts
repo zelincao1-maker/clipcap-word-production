@@ -195,6 +195,17 @@ async function runGenerationTaskItemSlotFill(params: {
       params.item.id,
       `模型自动回填失败，已转为人工核查：${getErrorMessage(error)}`,
     );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `[RouteErrorDetails][SlotFill] ${JSON.stringify(
+        buildErrorLogPayload(error, {
+          sourcePdfName: params.item.source_pdf_name,
+          slotCount: slotSchema.length,
+          pageCount: pages.length,
+        }),
+      )}`,
+    );
 
     await recalculateTaskSummary(admin, params.item.task_id);
 

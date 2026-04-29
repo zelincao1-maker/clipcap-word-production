@@ -27,17 +27,40 @@ export function buildErrorLogPayload(
   extra?: Record<string, unknown> | null,
 ): Record<string, unknown> {
   if (error instanceof Error) {
+    const cause = (error as Error & { cause?: unknown }).cause;
+    const causeRecord =
+      cause && typeof cause === 'object' ? (cause as Record<string, unknown>) : null;
+
     return {
       errorName: error.name,
       errorMessage: error.message,
       errorStack: error.stack ?? null,
+      errorCause:
+        typeof cause === 'string'
+          ? cause
+          : causeRecord && typeof causeRecord.message === 'string'
+            ? causeRecord.message
+            : null,
+      errorCode: causeRecord && typeof causeRecord.code === 'string' ? causeRecord.code : null,
+      errorErrno:
+        causeRecord && typeof causeRecord.errno === 'number' ? causeRecord.errno : null,
+      errorSyscall:
+        causeRecord && typeof causeRecord.syscall === 'string' ? causeRecord.syscall : null,
+      errorAddress:
+        causeRecord && typeof causeRecord.address === 'string' ? causeRecord.address : null,
+      errorPort: causeRecord && typeof causeRecord.port === 'number' ? causeRecord.port : null,
       ...(extra ?? {}),
     };
   }
 
   return {
     errorName: 'UnknownError',
-    errorMessage: typeof error === 'string' ? error : String(error),
+    errorMessage:
+      typeof error === 'string'
+        ? error
+        : error && typeof error === 'object'
+          ? JSON.stringify(error)
+          : String(error),
     errorStack: null,
     ...(extra ?? {}),
   };

@@ -1173,6 +1173,47 @@ function getErrorMessage(error: unknown) {
   return String(error);
 }
 
+function buildTraceErrorDetails(error: unknown, extra?: Record<string, unknown>) {
+  if (error instanceof Error) {
+    const cause = (error as Error & { cause?: unknown }).cause;
+    const causeRecord =
+      cause && typeof cause === 'object' ? (cause as Record<string, unknown>) : null;
+
+    return {
+      errorName: error.name,
+      errorMessage: error.message,
+      errorStack: error.stack ?? null,
+      errorCause:
+        typeof cause === 'string'
+          ? cause
+          : causeRecord && typeof causeRecord.message === 'string'
+            ? causeRecord.message
+            : null,
+      errorCode: causeRecord && typeof causeRecord.code === 'string' ? causeRecord.code : null,
+      errorErrno:
+        causeRecord && typeof causeRecord.errno === 'number' ? causeRecord.errno : null,
+      errorSyscall:
+        causeRecord && typeof causeRecord.syscall === 'string' ? causeRecord.syscall : null,
+      errorAddress:
+        causeRecord && typeof causeRecord.address === 'string' ? causeRecord.address : null,
+      errorPort: causeRecord && typeof causeRecord.port === 'number' ? causeRecord.port : null,
+      ...(extra ?? {}),
+    };
+  }
+
+  return {
+    errorName: 'UnknownError',
+    errorMessage:
+      typeof error === 'string'
+        ? error
+        : error && typeof error === 'object'
+          ? JSON.stringify(error)
+          : String(error),
+    errorStack: null,
+    ...(extra ?? {}),
+  };
+}
+
 function getProcessBudgetSnapshot(input: {
   processStartedAtMs?: number;
   processHardTimeoutMs?: number;
@@ -1582,6 +1623,15 @@ export async function extractPdfTextFromVisionPages(params: {
           `for ${params.pdfFileName}: ${getErrorMessage(failedOcrBatchResult.error)}`;
         console.error(failedBatchMessage, failedOcrBatchResult.error);
         await params.onTrace?.({ message: failedBatchMessage });
+        await params.onTrace?.({
+          message:
+            `[PDF Fill][OCR][ErrorDetails][Batch ${failedOcrBatchResult.index + 1}/${visionPageBatches.length}] ` +
+            `${JSON.stringify(
+              buildTraceErrorDetails(failedOcrBatchResult.error, {
+                documentName: params.pdfFileName,
+              }),
+            )}`,
+        });
       }
 
       const partialSummaryMessage =
@@ -1610,6 +1660,15 @@ export async function extractPdfTextFromVisionPages(params: {
       `${getErrorMessage(error)}`;
     console.error(ocrFailedMessage, error);
     await params.onTrace?.({ message: ocrFailedMessage });
+    await params.onTrace?.({
+      message:
+        `[PDF Fill][OCR][ErrorDetails][TopLevel] ` +
+        `${JSON.stringify(
+          buildTraceErrorDetails(error, {
+            documentName: params.pdfFileName,
+          }),
+        )}`,
+    });
     throw error;
   }
 
@@ -1786,6 +1845,15 @@ export async function fillTemplateSlotsFromPdf(params: {
         `[PDF Fill] Text slot fill failed for ${params.pdfFileName} after ${formatElapsedMs(textFillElapsedMs)}.`;
       console.error(textFillFailedMessage, error);
       await params.onTrace?.({ message: textFillFailedMessage });
+      await params.onTrace?.({
+        message:
+          `[PDF Fill][Text][ErrorDetails][TopLevel] ` +
+          `${JSON.stringify(
+            buildTraceErrorDetails(error, {
+              documentName: params.pdfFileName,
+            }),
+          )}`,
+      });
       throw error;
     }
   }
@@ -1819,6 +1887,15 @@ export async function fillTemplateSlotsFromPdf(params: {
       `[PDF Fill] Text slot fill failed for ${params.pdfFileName} after ${formatElapsedMs(textFillElapsedMs)}.`;
     console.error(textFillFailedMessage, error);
     await params.onTrace?.({ message: textFillFailedMessage });
+    await params.onTrace?.({
+      message:
+        `[PDF Fill][Text][ErrorDetails][TopLevel] ` +
+        `${JSON.stringify(
+          buildTraceErrorDetails(error, {
+            documentName: params.pdfFileName,
+          }),
+        )}`,
+    });
     throw error;
   }
 }

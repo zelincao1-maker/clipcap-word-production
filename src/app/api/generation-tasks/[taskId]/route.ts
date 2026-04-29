@@ -157,8 +157,9 @@ export async function DELETE(
       message: 'Generation task deleted.',
       route: '/api/generation-tasks/[taskId]',
       templateId: task.template_id ?? null,
-      taskId,
+      taskId: null,
       payload: {
+        deletedTaskId: taskId,
         itemCount: items?.length ?? 0,
         storagePathCount: storagePaths.length,
       },
