@@ -73,7 +73,7 @@ const MAX_TEXT_SLOT_BATCH_CONCURRENCY = 2;
 const MAX_TEXT_SLOTS_PER_REQUEST = 10;
 const PROCESS_HARD_TIMEOUT_MS = 300000;
 const PROCESS_OCR_SLOT_FILL_RESERVE_MS = 60000;
-const LLM_CONNECT_TIMEOUT_MS = 30000;
+const LLM_CONNECT_TIMEOUT_MS = 60000;
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 const llmFetchDispatcher = new Agent({
   connect: {
