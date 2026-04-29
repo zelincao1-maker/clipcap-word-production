@@ -294,7 +294,7 @@ function stringifyTraceJson(value: unknown) {
   return JSON.stringify(value);
 }
 
-function buildTextSlotFillPromptPayload(input: {
+export function buildTextSlotFillPromptPayload(input: {
   documentName: string;
   slots: GenerationSlotSchemaItem[];
   pageNumbers: number[];

@@ -295,6 +295,7 @@ export function BatchGenerateModal({
   const taskQuery = useGenerationTask(taskId);
   const launchedOcrItemIdsRef = useRef<Set<string>>(new Set());
   const launchedSlotFillItemIdsRef = useRef<Set<string>>(new Set());
+  const pendingSlotFillRefreshTimeoutsRef = useRef<Map<string, number[]>>(new Map());
   const itemStartedAtRef = useRef<Map<string, number>>(new Map());
   const itemTraceRef = useRef<Map<string, string>>(new Map());
   const refreshTaskLists = async () => {
@@ -319,7 +320,28 @@ export function BatchGenerateModal({
         console.log(
           `[Batch Generate][${item.source_pdf_name}] Slot fill launch deferred for task item ${item.id}; trace arrived before status became ocr_completed (trigger: ${trigger}, current status: ${item.status}).`,
         );
+        const existingTimeouts = pendingSlotFillRefreshTimeoutsRef.current.get(item.id) ?? [];
+
+        if (existingTimeouts.length === 0) {
+          const retryDelaysMs = [800, 2000, 4000];
+          const timeoutIds = retryDelaysMs.map((delayMs) =>
+            window.setTimeout(() => {
+              console.log(
+                `[Batch Generate][${item.source_pdf_name}] Forcing task refresh after deferred slot-fill launch for task item ${item.id} (+${delayMs}ms).`,
+              );
+              void refreshTaskLists();
+            }, delayMs),
+          );
+          pendingSlotFillRefreshTimeoutsRef.current.set(item.id, timeoutIds);
+        }
+
         return;
+      }
+
+      const pendingTimeouts = pendingSlotFillRefreshTimeoutsRef.current.get(item.id);
+      if (pendingTimeouts && pendingTimeouts.length > 0) {
+        pendingTimeouts.forEach((timeoutId) => window.clearTimeout(timeoutId));
+        pendingSlotFillRefreshTimeoutsRef.current.delete(item.id);
       }
 
       console.log(
@@ -448,6 +470,15 @@ export function BatchGenerateModal({
   }, [hasRunningItems]);
 
   useEffect(() => {
+    return () => {
+      pendingSlotFillRefreshTimeoutsRef.current.forEach((timeoutIds) => {
+        timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      });
+      pendingSlotFillRefreshTimeoutsRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) {
         return;
@@ -561,6 +592,9 @@ export function BatchGenerateModal({
         const slotFillPromptMatch = line.match(
           /^(?:\[PDF Fill\])?\[TextPrompt\]\[(.+)\] (.+)$/,
         );
+        const slotFillPromptPreviewMatch = line.match(
+          /^(?:\[PDF Fill\])?\[TextPromptPreview\]\[(.+)\] (.+)$/,
+        );
 
         if (ocrPageDataMatch) {
           const uploadedPageNumber = Number(ocrPageDataMatch[1]);
@@ -668,6 +702,27 @@ export function BatchGenerateModal({
 
           console.log(
             `[Batch Generate][${item.source_pdf_name}] Slot fill prompt via ${
+              parsedPrompt.route ?? '/api/generation-task-items/[taskItemId]/slot-fill'
+            } (${label})`,
+            parsedPrompt,
+          );
+          return;
+        }
+
+        if (slotFillPromptPreviewMatch) {
+          const label = slotFillPromptPreviewMatch[1] ?? 'AfterOCR';
+          const parsedPrompt = JSON.parse(slotFillPromptPreviewMatch[2] ?? '{}') as {
+            route?: string;
+            request_label?: string;
+            document_name?: string;
+            messages?: Array<{
+              role: string;
+              content: unknown;
+            }>;
+          };
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill prompt preview via ${
               parsedPrompt.route ?? '/api/generation-task-items/[taskItemId]/slot-fill'
             } (${label})`,
             parsedPrompt,

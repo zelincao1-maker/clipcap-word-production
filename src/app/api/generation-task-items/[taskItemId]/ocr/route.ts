@@ -1,5 +1,8 @@
 import { after, NextResponse } from 'next/server';
-import { extractPdfTextFromVisionPages } from '@/src/lib/llm/fill-template-from-pdf';
+import {
+  buildTextSlotFillPromptPayload,
+  extractPdfTextFromVisionPages,
+} from '@/src/lib/llm/fill-template-from-pdf';
 import {
   appendProcessingTrace,
   buildFallbackReviewPayload,
@@ -143,12 +146,36 @@ async function runGenerationTaskItemOcr(params: {
     });
 
     const totalTextLength = ocrPages.reduce((sum, page) => sum + page.text.length, 0);
+    const slotFillPromptPreview = {
+      route: `/api/generation-task-items/${params.item.id}/slot-fill`,
+      request_label: 'after-ocr-preview',
+      document_name: params.item.source_pdf_name,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a PDF slot filling assistant. Extract slot values from the provided PDF text chunk. Return JSON only.',
+        },
+        {
+          role: 'user',
+          content: buildTextSlotFillPromptPayload({
+            documentName: params.item.source_pdf_name,
+            slots: slotSchema,
+            pageNumbers: ocrPages.map((page) => page.page_number),
+            chunkText: ocrPages
+              .sort((left, right) => left.page_number - right.page_number)
+              .map((page) => `[Page ${page.page_number}]\n${page.text}`)
+              .join('\n'),
+          }),
+        },
+      ],
+    };
     const elapsedSeconds = Math.max(
       1,
       Math.round((Date.now() - new Date(params.item.started_at ?? startedAt.toISOString()).getTime()) / 1000),
     );
 
-    await admin
+    const { data: updatedOcrItem, error: updatedOcrItemError } = await admin
       .from('generation_task_items')
       .update({
         status: 'ocr_completed',
@@ -161,7 +188,17 @@ async function runGenerationTaskItemOcr(params: {
         slot_total_count: slotSchema.length,
         slot_completed_count: 0,
       })
-      .eq('id', params.item.id);
+      .eq('id', params.item.id)
+      .select('id, status')
+      .single();
+
+    if (updatedOcrItemError) {
+      throw updatedOcrItemError;
+    }
+
+    if (!updatedOcrItem || updatedOcrItem.status !== 'ocr_completed') {
+      throw new Error('OCR completed status was not persisted correctly before slot-fill handoff.');
+    }
 
     await recalculateTaskSummary(admin, params.item.task_id);
 
@@ -179,6 +216,16 @@ async function runGenerationTaskItemOcr(params: {
       admin,
       params.item.id,
       `下一步路由：/api/generation-task-items/${params.item.id}/slot-fill`,
+    );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `OCR 状态已持久化为 ${updatedOcrItem.status}。`,
+    );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `[PDF Fill][TextPromptPreview][AfterOCR] ${JSON.stringify(slotFillPromptPreview)}`,
     );
 
     await logEvent({
