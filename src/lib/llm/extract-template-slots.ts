@@ -1,4 +1,5 @@
 import mammoth from 'mammoth';
+import { Agent, fetch as undiciFetch } from 'undici';
 import {
   templateSlotExtractionResultSchema,
   type TemplateSlotExtractionResult,
@@ -15,6 +16,13 @@ const EXTRACTION_MAX_RETRIES = 2;
 const MIN_PARAGRAPH_CHARACTER_COUNT = 6;
 const TEMPLATE_EXTRACTION_LLM_CONCURRENCY = 6;
 const EXTRACTION_WAIT_HEARTBEAT_MS = 15000;
+const TEMPLATE_EXTRACTION_LLM_CONNECT_TIMEOUT_MS = 60000;
+type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
+const templateExtractionFetchDispatcher = new Agent({
+  connect: {
+    timeout: TEMPLATE_EXTRACTION_LLM_CONNECT_TIMEOUT_MS,
+  },
+});
 
 const EXTRACTION_SYSTEM_PROMPT = `
 你是中文法律文书模板槽位抽取助手。
@@ -161,6 +169,54 @@ function buildTraceErrorDetails(error: unknown, extra?: Record<string, unknown>)
   };
 }
 
+function describeNetworkError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const parts = [error.message];
+  const cause = (error as Error & { cause?: unknown }).cause;
+
+  if (cause && typeof cause === 'object') {
+    const causeRecord = cause as Record<string, unknown>;
+    const causeParts: string[] = [];
+
+    if (typeof causeRecord.code === 'string') {
+      causeParts.push(`code=${causeRecord.code}`);
+    }
+
+    if (typeof causeRecord.errno === 'number') {
+      causeParts.push(`errno=${causeRecord.errno}`);
+    }
+
+    if (typeof causeRecord.syscall === 'string') {
+      causeParts.push(`syscall=${causeRecord.syscall}`);
+    }
+
+    if (typeof causeRecord.address === 'string') {
+      causeParts.push(`address=${causeRecord.address}`);
+    }
+
+    if (typeof causeRecord.port === 'number') {
+      causeParts.push(`port=${causeRecord.port}`);
+    }
+
+    if (typeof causeRecord.host === 'string') {
+      causeParts.push(`host=${causeRecord.host}`);
+    }
+
+    if (typeof causeRecord.message === 'string' && causeRecord.message !== error.message) {
+      causeParts.push(`cause=${causeRecord.message}`);
+    }
+
+    if (causeParts.length > 0) {
+      parts.push(`(${causeParts.join(', ')})`);
+    }
+  }
+
+  return parts.join(' ');
+}
+
 async function requestTextLlmJson(input: {
   prompt: string;
   fileName: string;
@@ -193,12 +249,13 @@ async function requestTextLlmJson(input: {
         void input.onTrace?.({ message: waitingMessage });
       }, EXTRACTION_WAIT_HEARTBEAT_MS);
 
-      const upstream = await fetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
+      const upstream = await undiciFetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${getTextLlmApiKey()}`,
         },
+        dispatcher: templateExtractionFetchDispatcher,
         signal: controller.signal,
         body: JSON.stringify({
           model: getTextLlmModel(),
@@ -213,7 +270,7 @@ async function requestTextLlmJson(input: {
             },
           ],
         }),
-      });
+      } as UndiciFetchInit);
 
       if (!upstream.ok) {
         const details = await upstream.text();
@@ -247,7 +304,13 @@ async function requestTextLlmJson(input: {
         throw new Error(`Text LLM request failed (${upstream.status}): ${details}`);
       }
 
-      const payload = await upstream.json();
+      const payload = (await upstream.json()) as {
+        choices?: Array<{
+          message?: {
+            content?: string;
+          };
+        }>;
+      };
       const rawContent = payload?.choices?.[0]?.message?.content;
 
       if (typeof rawContent !== 'string' || !rawContent.trim()) {
@@ -266,7 +329,7 @@ async function requestTextLlmJson(input: {
       lastError = error;
       const failedMessage =
         `[Template Extract][LLM] Failed paragraph ${input.paragraphIndex + 1}/${input.totalParagraphs} ` +
-        `for ${input.fileName} (attempt ${attempt + 1}/${EXTRACTION_MAX_RETRIES + 1}, concurrency: ${input.concurrency}) after ${formatElapsedMs(Date.now() - requestStartedAt)}, reason: ${error instanceof Error ? error.message : String(error)}`;
+        `for ${input.fileName} (attempt ${attempt + 1}/${EXTRACTION_MAX_RETRIES + 1}, concurrency: ${input.concurrency}) after ${formatElapsedMs(Date.now() - requestStartedAt)}, reason: ${describeNetworkError(error)}`;
       console.error(failedMessage, error);
       await input.onTrace?.({ message: failedMessage });
       await input.onTrace?.({
