@@ -76,6 +76,19 @@ interface ParagraphProgress {
   totalParagraphs: number;
 }
 
+interface ExtractedParagraphResult {
+  paragraph_index: number;
+  paragraph_title: string;
+  items: Array<{
+    sequence: number;
+    paragraph_index?: number | null;
+    field_category: string;
+    original_value: string;
+    meaning_to_applicant: string;
+    original_doc_position: string;
+  }>;
+}
+
 interface ExtractTemplateSlotsFromDocxParams {
   buffer: Buffer;
   prompt: string;
@@ -468,19 +481,6 @@ async function extractParagraphsConcurrently(params: {
   onParagraphComplete?: (progress: ParagraphProgress) => Promise<void> | void;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
-  const extractedParagraphs: Array<{
-    paragraph_index: number;
-    paragraph_title: string;
-    items: Array<{
-      sequence: number;
-      paragraph_index?: number | null;
-      field_category: string;
-      original_value: string;
-      meaning_to_applicant: string;
-      original_doc_position: string;
-    }>;
-  }> = [];
-
   let completedParagraphs = 0;
   const totalParagraphs = params.paragraphs.length;
   const concurrency = Math.max(1, Math.min(TEMPLATE_EXTRACTION_LLM_CONCURRENCY, totalParagraphs));
@@ -491,49 +491,77 @@ async function extractParagraphsConcurrently(params: {
   console.log(startedMessage);
   await params.onTrace?.({ message: startedMessage });
 
-  const results = await runWithConcurrency({
+  const results = await runWithConcurrencySettled({
     items: params.paragraphs,
     concurrency,
     worker: async (paragraph) => {
-      const result = await extractSlotsForParagraph({
-        fileName: params.fileName,
-        prompt: params.prompt,
-        paragraph,
-        totalParagraphs,
-        concurrency,
-        onTrace: params.onTrace,
-      });
-
-      completedParagraphs += 1;
-      const progressMessage =
-        `[Template Extract] Paragraph extraction progress for ${params.fileName}: ` +
-        `${completedParagraphs}/${totalParagraphs} paragraphs completed.`;
-      console.log(progressMessage);
-      await params.onTrace?.({ message: progressMessage });
-      await params.onParagraphComplete?.({
-        completedParagraphs,
-        totalParagraphs,
-      });
-
-      return result;
+      try {
+        return await extractSlotsForParagraph({
+          fileName: params.fileName,
+          prompt: params.prompt,
+          paragraph,
+          totalParagraphs,
+          concurrency,
+          onTrace: params.onTrace,
+        });
+      } finally {
+        completedParagraphs += 1;
+        const progressMessage =
+          `[Template Extract] Paragraph extraction progress for ${params.fileName}: ` +
+          `${completedParagraphs}/${totalParagraphs} paragraphs processed.`;
+        console.log(progressMessage);
+        await params.onTrace?.({ message: progressMessage });
+        await params.onParagraphComplete?.({
+          completedParagraphs,
+          totalParagraphs,
+        });
+      }
     },
   });
-
-  const completedMessage =
-    `[Template Extract] LLM paragraph extraction completed for ${params.fileName} ` +
-    `(paragraphs: ${totalParagraphs}, concurrency: ${concurrency}).`;
-  console.log(completedMessage);
-  await params.onTrace?.({ message: completedMessage });
+  const extractedParagraphs: ExtractedParagraphResult[] = [];
+  const failedResults = results.filter(
+    (result): result is PromiseRejectedResult => result.status === 'rejected',
+  );
 
   for (const result of results) {
-    if (!result || result.items.length === 0) {
+    if (result.status !== 'fulfilled') {
       continue;
     }
 
-    extractedParagraphs.push(result);
+    if (!result.value || result.value.items.length === 0) {
+      continue;
+    }
+
+    extractedParagraphs.push(result.value);
   }
 
-  return extractedParagraphs;
+  if (failedResults.length > 0 && extractedParagraphs.length > 0) {
+    const partialMessage =
+      `[Template Extract] Partial success for ${params.fileName}: ` +
+      `${extractedParagraphs.length}/${totalParagraphs} paragraphs returned slots, ` +
+      `${failedResults.length} failed. Continuing with successful paragraph results only.`;
+    console.warn(partialMessage);
+    await params.onTrace?.({ message: partialMessage });
+  }
+
+  if (extractedParagraphs.length === 0) {
+    const allFailedError =
+      failedResults[0]?.reason ?? new Error('All template extraction paragraph requests failed.');
+    throw allFailedError;
+  }
+
+  const completedMessage =
+    `[Template Extract] LLM paragraph extraction completed for ${params.fileName} ` +
+    `(paragraphs: ${totalParagraphs}, concurrency: ${concurrency}, extracted_paragraphs: ${extractedParagraphs.length}, failed_paragraphs: ${failedResults.length}).`;
+  console.log(completedMessage);
+  await params.onTrace?.({ message: completedMessage });
+
+  return {
+    extractedParagraphs,
+    totalParagraphs,
+    succeededParagraphs: extractedParagraphs.length,
+    failedParagraphs: failedResults.length,
+  };
 }
 
 export async function extractTemplateSlotsFromDocx(
@@ -542,6 +570,8 @@ export async function extractTemplateSlotsFromDocx(
   uploadText: string;
   uploadHtml: string;
   totalParagraphs: number;
+  succeededParagraphs: number;
+  failedParagraphs: number;
 }> {
   const uploadText = await extractTextFromDocxBuffer(params.buffer);
   const uploadHtml = await extractHtmlFromDocxBuffer(params.buffer);
@@ -578,7 +608,7 @@ export async function extractTemplateSlotsFromDocx(
       }),
   });
 
-  const extractedParagraphs = await extractParagraphsConcurrently({
+  const paragraphExtraction = await extractParagraphsConcurrently({
     fileName: params.fileName,
     prompt: params.prompt,
     paragraphs: extractableParagraphs,
@@ -586,6 +616,7 @@ export async function extractTemplateSlotsFromDocx(
     onTrace: params.onTrace,
   });
 
+  const extractedParagraphs = paragraphExtraction.extractedParagraphs;
   extractedParagraphs.sort((left, right) => left.paragraph_index - right.paragraph_index);
 
   let nextSequence = 1;
@@ -604,11 +635,13 @@ export async function extractTemplateSlotsFromDocx(
     extraction_result: normalizedExtractionResult,
     uploadText,
     uploadHtml,
-    totalParagraphs: extractableParagraphs.length,
+    totalParagraphs: paragraphExtraction.totalParagraphs,
+    succeededParagraphs: paragraphExtraction.succeededParagraphs,
+    failedParagraphs: paragraphExtraction.failedParagraphs,
   };
 }
 
-async function runWithConcurrency<TInput, TOutput>(params: {
+async function runWithConcurrencySettled<TInput, TOutput>(params: {
   items: TInput[];
   concurrency: number;
   worker: (item: TInput, index: number) => Promise<TOutput>;
@@ -616,10 +649,10 @@ async function runWithConcurrency<TInput, TOutput>(params: {
   const { items, concurrency, worker } = params;
 
   if (items.length === 0) {
-    return [] as TOutput[];
+    return [] as PromiseSettledResult<TOutput>[];
   }
 
-  const results = new Array<TOutput>(items.length);
+  const results = new Array<PromiseSettledResult<TOutput>>(items.length);
   let nextIndex = 0;
 
   async function consume() {
@@ -631,7 +664,17 @@ async function runWithConcurrency<TInput, TOutput>(params: {
         return;
       }
 
-      results[currentIndex] = await worker(items[currentIndex] as TInput, currentIndex);
+      try {
+        results[currentIndex] = {
+          status: 'fulfilled',
+          value: await worker(items[currentIndex] as TInput, currentIndex),
+        };
+      } catch (error) {
+        results[currentIndex] = {
+          status: 'rejected',
+          reason: error,
+        };
+      }
     }
   }
 

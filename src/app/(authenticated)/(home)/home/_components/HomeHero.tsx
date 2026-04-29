@@ -275,7 +275,7 @@ export function HomeHero() {
         color: 'teal',
         loading: false,
         title: '处理完成',
-        message: '槽位识别完成，正在打开编辑页面。',
+        message: task.error_message ?? '槽位识别完成，正在打开编辑页面。',
         withCloseButton: true,
       });
 

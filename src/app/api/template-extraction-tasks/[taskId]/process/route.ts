@@ -170,6 +170,15 @@ export async function POST(
       },
     });
 
+    const partialCompletionMessage =
+      result.failedParagraphs > 0
+        ? `部分段落槽位抽取未返回：已成功抽取 ${result.succeededParagraphs}/${result.totalParagraphs} 段，其余内容请在槽位核查页手动补充。`
+        : null;
+
+    if (partialCompletionMessage) {
+      await appendProcessingTrace(admin, task.id, partialCompletionMessage);
+    }
+
     await admin
       .from('template_extraction_tasks')
       .update({
@@ -182,7 +191,7 @@ export async function POST(
           document_info: result.document_info,
           extraction_result: result.extraction_result,
         },
-        error_message: null,
+        error_message: partialCompletionMessage,
         finished_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
@@ -199,6 +208,8 @@ export async function POST(
         taskId: task.id,
         totalParagraphs: result.totalParagraphs,
         extractedParagraphs: result.extraction_result.length,
+        succeededParagraphs: result.succeededParagraphs,
+        failedParagraphs: result.failedParagraphs,
         uploadTextLength: result.uploadText.length,
       },
     });

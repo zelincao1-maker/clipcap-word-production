@@ -5,6 +5,7 @@ import type {
   SavedTemplateDetail,
   SavedTemplateSummary,
 } from '@/src/app/api/types/template-library';
+import { logClientRequestError } from '@/src/lib/network/client-request-error';
 import type { SlotReviewSessionPayload } from '@/src/lib/templates/slot-review-session';
 
 interface SaveTemplateInput {
@@ -19,17 +20,27 @@ export function useUserTemplates(enabled = true) {
     queryKey: ['saved-templates'],
     enabled,
     queryFn: async () => {
-      const response = await fetch('/api/templates');
-      const payload = (await response.json()) as {
-        message?: string;
-        data?: SavedTemplateSummary[];
-      };
+      try {
+        const response = await fetch('/api/templates');
+        const payload = (await response.json()) as {
+          message?: string;
+          data?: SavedTemplateSummary[];
+        };
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '读取模板列表失败，请稍后重试。');
+        if (!response.ok || !payload.data) {
+          throw new Error(payload.message ?? '读取模板列表失败，请稍后重试。');
+        }
+
+        return payload.data;
+      } catch (error) {
+        logClientRequestError({
+          label: '[Templates] Request failed',
+          route: '/api/templates',
+          method: 'GET',
+          error,
+        });
+        throw error;
       }
-
-      return payload.data;
     },
   });
 }
@@ -37,24 +48,37 @@ export function useUserTemplates(enabled = true) {
 export function useSaveTemplate() {
   return useMutation({
     mutationFn: async (input: SaveTemplateInput) => {
-      const response = await fetch('/api/templates', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(input),
-      });
+      try {
+        const response = await fetch('/api/templates', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(input),
+        });
 
-      const payload = (await response.json()) as {
-        message?: string;
-        data?: SavedTemplateSummary;
-      };
+        const payload = (await response.json()) as {
+          message?: string;
+          data?: SavedTemplateSummary;
+        };
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '模板保存失败，请稍后重试。');
+        if (!response.ok || !payload.data) {
+          throw new Error(payload.message ?? '模板保存失败，请稍后重试。');
+        }
+
+        return payload.data;
+      } catch (error) {
+        logClientRequestError({
+          label: '[Templates] Save failed',
+          route: '/api/templates',
+          method: 'POST',
+          error,
+          extra: {
+            templateName: input.templateName,
+          },
+        });
+        throw error;
       }
-
-      return payload.data;
     },
   });
 }
@@ -62,17 +86,28 @@ export function useSaveTemplate() {
 export function useLoadTemplateForReview() {
   return useMutation({
     mutationFn: async (templateId: string) => {
-      const response = await fetch(`/api/templates/${templateId}`);
-      const payload = (await response.json()) as {
-        message?: string;
-        data?: SavedTemplateDetail;
-      };
+      try {
+        const response = await fetch(`/api/templates/${templateId}`);
+        const payload = (await response.json()) as {
+          message?: string;
+          data?: SavedTemplateDetail;
+        };
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '读取模板详情失败，请稍后重试。');
+        if (!response.ok || !payload.data) {
+          throw new Error(payload.message ?? '读取模板详情失败，请稍后重试。');
+        }
+
+        return payload.data;
+      } catch (error) {
+        logClientRequestError({
+          label: '[Templates] Detail request failed',
+          route: `/api/templates/${templateId}`,
+          method: 'GET',
+          error,
+          extra: { templateId },
+        });
+        throw error;
       }
-
-      return payload.data;
     },
   });
 }
@@ -80,20 +115,31 @@ export function useLoadTemplateForReview() {
 export function useDeleteTemplate() {
   return useMutation({
     mutationFn: async (templateId: string) => {
-      const response = await fetch(`/api/templates/${templateId}`, {
-        method: 'DELETE',
-      });
+      try {
+        const response = await fetch(`/api/templates/${templateId}`, {
+          method: 'DELETE',
+        });
 
-      const payload = (await response.json()) as {
-        message?: string;
-        data?: { id: string };
-      };
+        const payload = (await response.json()) as {
+          message?: string;
+          data?: { id: string };
+        };
 
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '删除模板失败，请稍后重试。');
+        if (!response.ok || !payload.data) {
+          throw new Error(payload.message ?? '删除模板失败，请稍后重试。');
+        }
+
+        return payload.data;
+      } catch (error) {
+        logClientRequestError({
+          label: '[Templates] Delete failed',
+          route: `/api/templates/${templateId}`,
+          method: 'DELETE',
+          error,
+          extra: { templateId },
+        });
+        throw error;
       }
-
-      return payload.data;
     },
   });
 }

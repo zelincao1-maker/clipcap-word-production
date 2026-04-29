@@ -7,6 +7,7 @@ import type {
   GenerationTaskItemSummary,
   GenerationTemplateTaskListResponse,
 } from '@/src/app/api/types/generation-task';
+import { logClientRequestError } from '@/src/lib/network/client-request-error';
 
 async function reportClientError(input: {
   eventType: string;
@@ -97,17 +98,28 @@ export function useGenerationTask(taskId: string | null) {
       return hasRunningItems ? 1000 : false;
     },
     queryFn: async () => {
-      const response = await fetch(`/api/generation-tasks/${taskId}`);
-      const { payload, message } = await parseApiPayload<{
-        message?: string;
-        data?: GenerationTaskDetailResponse;
-      }>(response);
+      try {
+        const response = await fetch(`/api/generation-tasks/${taskId}`);
+        const { payload, message } = await parseApiPayload<{
+          message?: string;
+          data?: GenerationTaskDetailResponse;
+        }>(response);
 
-      if (!response.ok || !payload?.data) {
-        throw new Error(message ?? '读取批量生成任务失败，请稍后重试。');
+        if (!response.ok || !payload?.data) {
+          throw new Error(message ?? '读取批量生成任务失败，请稍后重试。');
+        }
+
+        return payload.data;
+      } catch (error) {
+        logClientRequestError({
+          label: '[Generation Tasks] Detail request failed',
+          route: `/api/generation-tasks/${taskId}`,
+          method: 'GET',
+          error,
+          extra: { taskId },
+        });
+        throw error;
       }
-
-      return payload.data;
     },
   });
 }
@@ -117,17 +129,27 @@ export function useTemplateGenerationTasks(enabled = true) {
     queryKey: ['generation-template-tasks'],
     enabled,
     queryFn: async () => {
-      const response = await fetch('/api/generation-tasks');
-      const { payload, message } = await parseApiPayload<{
-        message?: string;
-        data?: GenerationTemplateTaskListResponse;
-      }>(response);
+      try {
+        const response = await fetch('/api/generation-tasks');
+        const { payload, message } = await parseApiPayload<{
+          message?: string;
+          data?: GenerationTemplateTaskListResponse;
+        }>(response);
 
-      if (!response.ok || !payload?.data) {
-        throw new Error(message ?? '读取模板任务列表失败，请稍后重试。');
+        if (!response.ok || !payload?.data) {
+          throw new Error(message ?? '读取模板任务列表失败，请稍后重试。');
+        }
+
+        return payload.data;
+      } catch (error) {
+        logClientRequestError({
+          label: '[Generation Tasks] List request failed',
+          route: '/api/generation-tasks',
+          method: 'GET',
+          error,
+        });
+        throw error;
       }
-
-      return payload.data;
     },
   });
 }
@@ -135,53 +157,64 @@ export function useTemplateGenerationTasks(enabled = true) {
 export function useProcessGenerationTaskItem() {
   return useMutation({
     mutationFn: async (taskItemId: string) => {
-      console.log('[Generation Task Item] OCR request', {
-        taskItemId,
-        route: `/api/generation-task-items/${taskItemId}/ocr`,
-        method: 'POST',
-      });
+      try {
+        console.log('[Generation Task Item] OCR request', {
+          taskItemId,
+          route: `/api/generation-task-items/${taskItemId}/ocr`,
+          method: 'POST',
+        });
 
-      const response = await fetch(`/api/generation-task-items/${taskItemId}/ocr`, {
-        method: 'POST',
-      });
-      const { payload, message } = await parseApiPayload<{
-        message?: string;
-        data?: {
-          item: GenerationTaskItemSummary;
-        };
-      }>(response);
+        const response = await fetch(`/api/generation-task-items/${taskItemId}/ocr`, {
+          method: 'POST',
+        });
+        const { payload, message } = await parseApiPayload<{
+          message?: string;
+          data?: {
+            item: GenerationTaskItemSummary;
+          };
+        }>(response);
 
-      if (!response.ok || !payload?.data) {
-        const errorMessage = message ?? 'OCR 处理失败，请稍后重试。';
-        console.error('[Generation Task Item] OCR failed', {
+        if (!response.ok || !payload?.data) {
+          const errorMessage = message ?? 'OCR 处理失败，请稍后重试。';
+          console.error('[Generation Task Item] OCR failed', {
+            status: response.status,
+            statusText: response.statusText,
+            taskItemId,
+            message: errorMessage,
+          });
+
+          await reportClientError({
+            eventType: 'generation_task_item_ocr_failed_frontend',
+            message: errorMessage,
+            route: '/api/generation-task-items/[taskItemId]/ocr',
+            taskItemId,
+            payload: {
+              status: response.status,
+              statusText: response.statusText,
+            },
+          });
+
+          throw new Error(errorMessage);
+        }
+
+        console.log('[Generation Task Item] OCR response', {
           status: response.status,
           statusText: response.statusText,
           taskItemId,
-          message: errorMessage,
+          data: payload.data,
         });
 
-        await reportClientError({
-          eventType: 'generation_task_item_ocr_failed_frontend',
-          message: errorMessage,
-          route: '/api/generation-task-items/[taskItemId]/ocr',
-          taskItemId,
-          payload: {
-            status: response.status,
-            statusText: response.statusText,
-          },
+        return payload.data;
+      } catch (error) {
+        logClientRequestError({
+          label: '[Generation Task Item] OCR request failed at network layer',
+          route: `/api/generation-task-items/${taskItemId}/ocr`,
+          method: 'POST',
+          error,
+          extra: { taskItemId },
         });
-
-        throw new Error(errorMessage);
+        throw error;
       }
-
-      console.log('[Generation Task Item] OCR response', {
-        status: response.status,
-        statusText: response.statusText,
-        taskItemId,
-        data: payload.data,
-      });
-
-      return payload.data;
     },
   });
 }
@@ -189,53 +222,64 @@ export function useProcessGenerationTaskItem() {
 export function useStartGenerationTaskItemSlotFill() {
   return useMutation({
     mutationFn: async (taskItemId: string) => {
-      console.log('[Generation Task Item] Slot fill request', {
-        taskItemId,
-        route: `/api/generation-task-items/${taskItemId}/slot-fill`,
-        method: 'POST',
-      });
+      try {
+        console.log('[Generation Task Item] Slot fill request', {
+          taskItemId,
+          route: `/api/generation-task-items/${taskItemId}/slot-fill`,
+          method: 'POST',
+        });
 
-      const response = await fetch(`/api/generation-task-items/${taskItemId}/slot-fill`, {
-        method: 'POST',
-      });
-      const { payload, message } = await parseApiPayload<{
-        message?: string;
-        data?: {
-          item: GenerationTaskItemSummary;
-        };
-      }>(response);
+        const response = await fetch(`/api/generation-task-items/${taskItemId}/slot-fill`, {
+          method: 'POST',
+        });
+        const { payload, message } = await parseApiPayload<{
+          message?: string;
+          data?: {
+            item: GenerationTaskItemSummary;
+          };
+        }>(response);
 
-      if (!response.ok || !payload?.data) {
-        const errorMessage = message ?? '槽位回填启动失败，请稍后重试。';
-        console.error('[Generation Task Item] Slot fill failed', {
+        if (!response.ok || !payload?.data) {
+          const errorMessage = message ?? '槽位回填启动失败，请稍后重试。';
+          console.error('[Generation Task Item] Slot fill failed', {
+            status: response.status,
+            statusText: response.statusText,
+            taskItemId,
+            message: errorMessage,
+          });
+
+          await reportClientError({
+            eventType: 'generation_task_item_slot_fill_failed_frontend',
+            message: errorMessage,
+            route: '/api/generation-task-items/[taskItemId]/slot-fill',
+            taskItemId,
+            payload: {
+              status: response.status,
+              statusText: response.statusText,
+            },
+          });
+
+          throw new Error(errorMessage);
+        }
+
+        console.log('[Generation Task Item] Slot fill response', {
           status: response.status,
           statusText: response.statusText,
           taskItemId,
-          message: errorMessage,
+          data: payload.data,
         });
 
-        await reportClientError({
-          eventType: 'generation_task_item_slot_fill_failed_frontend',
-          message: errorMessage,
-          route: '/api/generation-task-items/[taskItemId]/slot-fill',
-          taskItemId,
-          payload: {
-            status: response.status,
-            statusText: response.statusText,
-          },
+        return payload.data;
+      } catch (error) {
+        logClientRequestError({
+          label: '[Generation Task Item] Slot fill request failed at network layer',
+          route: `/api/generation-task-items/${taskItemId}/slot-fill`,
+          method: 'POST',
+          error,
+          extra: { taskItemId },
         });
-
-        throw new Error(errorMessage);
+        throw error;
       }
-
-      console.log('[Generation Task Item] Slot fill response', {
-        status: response.status,
-        statusText: response.statusText,
-        taskItemId,
-        data: payload.data,
-      });
-
-      return payload.data;
     },
   });
 }
@@ -245,17 +289,28 @@ export function useGenerationTaskItem(taskItemId: string | null) {
     queryKey: ['generation-task-item', taskItemId],
     enabled: Boolean(taskItemId),
     queryFn: async () => {
-      const response = await fetch(`/api/generation-task-items/${taskItemId}`);
-      const { payload, message } = await parseApiPayload<{
-        message?: string;
-        data?: GenerationTaskItemDetailResponse;
-      }>(response);
+      try {
+        const response = await fetch(`/api/generation-task-items/${taskItemId}`);
+        const { payload, message } = await parseApiPayload<{
+          message?: string;
+          data?: GenerationTaskItemDetailResponse;
+        }>(response);
 
-      if (!response.ok || !payload?.data) {
-        throw new Error(message ?? '读取任务详情失败，请稍后重试。');
+        if (!response.ok || !payload?.data) {
+          throw new Error(message ?? '读取任务详情失败，请稍后重试。');
+        }
+
+        return payload.data;
+      } catch (error) {
+        logClientRequestError({
+          label: '[Generation Task Item] Detail request failed',
+          route: `/api/generation-task-items/${taskItemId}`,
+          method: 'GET',
+          error,
+          extra: { taskItemId },
+        });
+        throw error;
       }
-
-      return payload.data;
     },
   });
 }
@@ -263,26 +318,37 @@ export function useGenerationTaskItem(taskItemId: string | null) {
 export function useReviewGenerationTaskItem() {
   return useMutation({
     mutationFn: async (input: { taskItemId: string; reviewPayload: unknown }) => {
-      const response = await fetch(`/api/generation-task-items/${input.taskItemId}/review`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          reviewPayload: input.reviewPayload,
-        }),
-      });
+      try {
+        const response = await fetch(`/api/generation-task-items/${input.taskItemId}/review`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            reviewPayload: input.reviewPayload,
+          }),
+        });
 
-      const { payload, message } = await parseApiPayload<{
-        message?: string;
-        data?: GenerationTaskItemDetailResponse;
-      }>(response);
+        const { payload, message } = await parseApiPayload<{
+          message?: string;
+          data?: GenerationTaskItemDetailResponse;
+        }>(response);
 
-      if (!response.ok || !payload?.data) {
-        throw new Error(message ?? '保存核查结果失败，请稍后重试。');
+        if (!response.ok || !payload?.data) {
+          throw new Error(message ?? '保存核查结果失败，请稍后重试。');
+        }
+
+        return payload.data;
+      } catch (error) {
+        logClientRequestError({
+          label: '[Generation Task Item] Review request failed',
+          route: `/api/generation-task-items/${input.taskItemId}/review`,
+          method: 'POST',
+          error,
+          extra: { taskItemId: input.taskItemId },
+        });
+        throw error;
       }
-
-      return payload.data;
     },
   });
 }

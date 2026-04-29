@@ -7,6 +7,7 @@ import {
   AUTH_SYNC_EVENT_TYPE,
   AUTH_SYNC_STORAGE_KEY,
 } from '@/src/lib/auth/auth-sync';
+import { logClientRequestError } from '@/src/lib/network/client-request-error';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 
 export type RegistrationStatus = 'anonymous' | 'pending' | 'completed';
@@ -120,6 +121,17 @@ export function RegistrationGateStoreProvider({ children }: RegistrationGateStor
           useCase: payload.data.use_case ?? '',
           onboardedAt: payload.data.onboarded_at,
         });
+      } catch (error) {
+        logClientRequestError({
+          label: '[Profile] Sync request failed',
+          route: '/api/profile',
+          method: 'GET',
+          error,
+          extra: {
+            hasAuthenticatedUser: Boolean(currentUser),
+          },
+        });
+        setProfile(null);
       } finally {
         setIsLoading(false);
       }
