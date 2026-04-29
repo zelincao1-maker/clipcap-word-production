@@ -655,20 +655,21 @@ export function BatchGenerateModal({
           return;
         }
 
+        if (line.includes('OCR 已完成，前端轮询检测到后将自动启动槽位回填')) {
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] OCR completion trace observed for task item ${item.id}; current polled status is ${item.status}.`,
+          );
+          launchSlotFillForItem(item, 'trace');
+          console.log(`[Batch Generate][${item.source_pdf_name}] ${line}`);
+          return;
+        }
+
         if (
           line.includes('[PDF Fill][Text]') ||
           line.includes('Text slot fill') ||
           line.includes('槽位回填')
         ) {
           console.log(`[Batch Generate][${item.source_pdf_name}] ${line}`);
-          return;
-        }
-
-        if (line.includes('OCR 已完成，前端轮询检测到后将自动启动槽位回填')) {
-          console.log(
-            `[Batch Generate][${item.source_pdf_name}] OCR completion trace observed for task item ${item.id}; current polled status is ${item.status}.`,
-          );
-          launchSlotFillForItem(item, 'trace');
           return;
         }
 
