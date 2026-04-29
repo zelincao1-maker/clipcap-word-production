@@ -315,6 +315,13 @@ export function BatchGenerateModal({
         return;
       }
 
+      if (trigger === 'trace' && item.status !== 'ocr_completed') {
+        console.log(
+          `[Batch Generate][${item.source_pdf_name}] Slot fill launch deferred for task item ${item.id}; trace arrived before status became ocr_completed (trigger: ${trigger}, current status: ${item.status}).`,
+        );
+        return;
+      }
+
       console.log(
         `[Batch Generate][${item.source_pdf_name}] Starting slot fill for task item ${item.id} via /api/generation-task-items/${item.id}/slot-fill (trigger: ${trigger}, current status: ${item.status}).`,
       );
@@ -329,18 +336,31 @@ export function BatchGenerateModal({
           void refreshTaskLists();
         })
         .catch((error) => {
+          launchedSlotFillItemIdsRef.current.delete(item.id);
           console.error(
             `[Batch Generate][${item.source_pdf_name}] Slot fill request failed for task item ${item.id} (trigger: ${trigger}).`,
             error,
           );
-          notifications.show({
-            color: 'red',
-            title: '槽位回填失败',
-            message:
-              error instanceof Error
-                ? `${item.source_pdf_name}：${error.message}`
-                : `${item.source_pdf_name} 槽位回填启动失败，请稍后重试。`,
-          });
+
+          const errorMessage =
+            error instanceof Error
+              ? error.message
+              : `${item.source_pdf_name} 槽位回填启动失败，请稍后重试。`;
+
+          if (!errorMessage.includes('尚未完成 OCR')) {
+            notifications.show({
+              color: 'red',
+              title: '槽位回填失败',
+              message:
+                error instanceof Error
+                  ? `${item.source_pdf_name}：${error.message}`
+                  : `${item.source_pdf_name} 槽位回填启动失败，请稍后重试。`,
+            });
+          } else {
+            console.log(
+              `[Batch Generate][${item.source_pdf_name}] Slot fill launch will be retried after OCR status catches up for task item ${item.id}.`,
+            );
+          }
 
           void refreshTaskLists();
         });
