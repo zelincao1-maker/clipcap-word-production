@@ -18,6 +18,7 @@ import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 const PROCESS_HARD_TIMEOUT_MS = maxDuration * 1000;
+const PROCESS_ROUTE_FINALIZATION_RESERVE_MS = 15000;
 
 async function runGenerationTaskItemSlotFill(params: {
   item: GenerationTaskItemRecord;
@@ -84,6 +85,7 @@ async function runGenerationTaskItemSlotFill(params: {
       pages,
       processStartedAtMs,
       processHardTimeoutMs: PROCESS_HARD_TIMEOUT_MS,
+      processReserveMs: PROCESS_ROUTE_FINALIZATION_RESERVE_MS,
       onTrace: async ({ message }) => {
         await appendProcessingTrace(admin, params.item.id, message);
       },

@@ -63,7 +63,7 @@ const MAX_TEXT_REQUEST_RETRIES = 2;
 const PDF_SLOT_FILL_VISION_TIMEOUT_BASE_MS = 300000;
 const PDF_SLOT_FILL_VISION_TIMEOUT_PER_PAGE_MS = 15000;
 const PDF_SLOT_FILL_VISION_TIMEOUT_PER_SLOT_MS = 20000;
-const PDF_SLOT_FILL_VISION_TIMEOUT_MAX_MS = 540000;
+const PDF_SLOT_FILL_VISION_TIMEOUT_MAX_MS = 300000;
 const MAX_VISION_REQUEST_RETRIES = 2;
 const MAX_TEXT_PAGES_PER_CHUNK = 8;
 const MAX_TEXT_CHARS_PER_CHUNK = 12000;
@@ -74,6 +74,7 @@ const MAX_TEXT_SLOTS_PER_REQUEST = 10;
 const PROCESS_HARD_TIMEOUT_MS = 300000;
 const PROCESS_OCR_SLOT_FILL_RESERVE_MS = 60000;
 const LLM_CONNECT_TIMEOUT_MS = 60000;
+const PROCESS_ROUTE_FINALIZATION_RESERVE_MS = 15000;
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 const llmFetchDispatcher = new Agent({
   connect: {
@@ -1308,6 +1309,7 @@ async function extractAllSlotsWithTextModel(input: {
   onTrace?: (trace: { message: string }) => Promise<void> | void;
   processStartedAtMs?: number;
   processHardTimeoutMs?: number;
+  processReserveMs?: number;
 }) {
   for (let attempt = 1; attempt <= MAX_TEXT_REQUEST_RETRIES; attempt += 1) {
     const controller = new AbortController();
@@ -1319,9 +1321,24 @@ async function extractAllSlotsWithTextModel(input: {
     });
     const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
     let heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
+    let budgetAbortTriggered = false;
 
     try {
       const requestLabel = input.requestLabel ?? 'full-text slot request';
+      const startingBudgetSnapshot = getProcessBudgetSnapshot({
+        processStartedAtMs: input.processStartedAtMs,
+        processHardTimeoutMs: input.processHardTimeoutMs,
+      });
+
+      if (
+        startingBudgetSnapshot &&
+        startingBudgetSnapshot.remainingBudgetMs <=
+          (input.processReserveMs ?? PROCESS_ROUTE_FINALIZATION_RESERVE_MS)
+      ) {
+        throw new Error(
+          'Skipping text slot fill request because remaining /process budget is too low; handing off to manual review.',
+        );
+      }
       const promptPayload = buildTextSlotFillPromptPayload({
         documentName: input.documentName,
         slots: input.slots,
@@ -1356,6 +1373,33 @@ async function extractAllSlotsWithTextModel(input: {
       await input.onTrace?.({ message: requestStartedMessage });
       heartbeatIntervalId = setInterval(() => {
         const elapsedMs = Date.now() - requestStartedAt;
+        const budgetSnapshot = getProcessBudgetSnapshot({
+          processStartedAtMs: input.processStartedAtMs,
+          processHardTimeoutMs: input.processHardTimeoutMs,
+        });
+
+        if (
+          budgetSnapshot &&
+          !budgetAbortTriggered &&
+          budgetSnapshot.remainingBudgetMs <=
+            (input.processReserveMs ?? PROCESS_ROUTE_FINALIZATION_RESERVE_MS)
+        ) {
+          budgetAbortTriggered = true;
+          const budgetAbortMessage =
+            `[PDF Fill][Text] Aborting ${requestLabel} for ${input.documentName} early ` +
+            `to preserve ${formatElapsedMs(
+              input.processReserveMs ?? PROCESS_ROUTE_FINALIZATION_RESERVE_MS,
+            )} for route finalization (process elapsed: ${formatElapsedMs(
+              budgetSnapshot.totalElapsedMs,
+            )}, remaining /process budget: ${formatElapsedMs(
+              budgetSnapshot.remainingBudgetMs,
+            )}).`;
+          console.warn(budgetAbortMessage);
+          void input.onTrace?.({ message: budgetAbortMessage });
+          controller.abort();
+          return;
+        }
+
         const heartbeatMessage =
           `[PDF Fill][Text] Waiting on ${requestLabel} for ${input.documentName} ` +
           `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}${formatProcessBudgetSuffix({
@@ -1514,7 +1558,13 @@ async function extractAllSlotsWithTextModel(input: {
       const shouldRetry =
         attempt < MAX_TEXT_REQUEST_RETRIES && shouldRetryTextRequest(normalizedError);
 
-      if (!shouldRetry) {
+      if (!shouldRetry || budgetAbortTriggered) {
+        if (budgetAbortTriggered) {
+          throw new Error(
+            'Text slot fill request stopped early because remaining /process budget was too low; handing off to manual review.',
+          );
+        }
+
         if (normalizedError instanceof DOMException && normalizedError.name === 'AbortError') {
           throw new Error('Text slot extraction timed out after multiple attempts.');
         }
@@ -1540,6 +1590,7 @@ export async function fillSlotsFromTextPages(params: {
   pages: PdfPageInput[];
   processStartedAtMs?: number;
   processHardTimeoutMs?: number;
+  processReserveMs?: number;
   onProgress?: (progress: { completedSlots: number; totalSlots: number }) => Promise<void> | void;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
@@ -1578,6 +1629,7 @@ export async function fillSlotsFromTextPages(params: {
     onTrace: params.onTrace,
     processStartedAtMs: params.processStartedAtMs,
     processHardTimeoutMs: params.processHardTimeoutMs,
+    processReserveMs: params.processReserveMs,
   });
 
   const completedSlots = fullDocumentResult.extracted_items.filter((item) =>
@@ -1598,6 +1650,7 @@ export async function extractPdfTextFromVisionPages(params: {
   visionPages: PdfVisionPageInput[];
   processStartedAtMs?: number;
   processHardTimeoutMs?: number;
+  processReserveMs?: number;
   onTrace?: (trace: { message: string }) => Promise<void> | void;
   onProgress?: (progress: { completedSlots: number; totalSlots: number }) => Promise<void> | void;
 }) {
@@ -1628,7 +1681,7 @@ export async function extractPdfTextFromVisionPages(params: {
           totalBatches: visionPageBatches.length,
           processStartedAtMs: params.processStartedAtMs,
           processHardTimeoutMs: params.processHardTimeoutMs ?? PROCESS_HARD_TIMEOUT_MS,
-          processReserveMs: PROCESS_OCR_SLOT_FILL_RESERVE_MS,
+          processReserveMs: params.processReserveMs ?? PROCESS_OCR_SLOT_FILL_RESERVE_MS,
           onTrace: params.onTrace,
         }),
     });
