@@ -92,7 +92,7 @@ export async function POST(request: Request) {
         completed_paragraphs: 0,
       })
       .select(
-        'id, status, source_docx_name, prompt, total_paragraphs, completed_paragraphs, created_at, started_at, finished_at, error_message',
+        'id, status, source_docx_name, prompt, total_paragraphs, completed_paragraphs, processing_trace, created_at, started_at, finished_at, error_message',
       )
       .single();
 

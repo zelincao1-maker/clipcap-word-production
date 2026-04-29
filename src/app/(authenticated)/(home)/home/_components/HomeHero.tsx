@@ -78,6 +78,9 @@ async function fetchTemplateExtractionTask(taskId: string) {
 }
 
 async function startTemplateExtractionTask(taskId: string) {
+  console.log(
+    `[Template Extract] Starting process route via /api/template-extraction-tasks/${taskId}/process`,
+  );
   const response = await fetch(`/api/template-extraction-tasks/${taskId}/process`, {
     method: 'POST',
   });
@@ -102,6 +105,7 @@ export function HomeHero() {
   const uploadDocxBase64PromiseRef = useRef<Promise<string> | null>(null);
   const processKickoffInFlightRef = useRef(false);
   const hasHandledTaskCompletionRef = useRef(false);
+  const lastExtractionTraceRef = useRef('');
 
   const router = useRouter();
   const { isAuthenticated, registrationStatus, signOut } = useRegistrationGateStore();
@@ -210,6 +214,7 @@ export function HomeHero() {
     setIsSubmissionLocked(false);
     setProcessingSeconds(0);
     processKickoffInFlightRef.current = false;
+    lastExtractionTraceRef.current = '';
   };
 
   const ensureTaskProcessing = async (taskId: string) => {
@@ -295,6 +300,53 @@ export function HomeHero() {
       resetExtractionTaskState();
     }
   };
+
+  useEffect(() => {
+    const nextTrace = activeExtractionTask?.processing_trace ?? '';
+    const previousTrace = lastExtractionTraceRef.current;
+
+    if (!nextTrace || nextTrace === previousTrace) {
+      return;
+    }
+
+    const appendedTrace = nextTrace.startsWith(previousTrace)
+      ? nextTrace.slice(previousTrace.length)
+      : nextTrace;
+    const traceLines = appendedTrace
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    for (const line of traceLines) {
+      if (
+        line.includes('[Template Extract][LLM][ErrorDetails]') ||
+        line.includes('[RouteErrorDetails][TemplateExtraction]')
+      ) {
+        const jsonStartIndex = line.indexOf('{');
+
+        if (jsonStartIndex >= 0) {
+          const prefix = line.slice(0, jsonStartIndex).trim();
+          const rawJson = line.slice(jsonStartIndex);
+
+          try {
+            console.error(prefix, JSON.parse(rawJson));
+            continue;
+          } catch {
+            // Fall through to raw logging.
+          }
+        }
+      }
+
+      if (line.includes('[Template Extract][LLM] Failed') || line.includes('槽位抽取失败')) {
+        console.error(line);
+        continue;
+      }
+
+      console.log(line);
+    }
+
+    lastExtractionTraceRef.current = nextTrace;
+  }, [activeExtractionTask?.processing_trace]);
 
   useEffect(() => {
     if (!activeExtractionTask) {

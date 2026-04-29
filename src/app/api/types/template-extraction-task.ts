@@ -15,6 +15,7 @@ export const templateExtractionTaskResponseSchema = z.object({
   prompt: z.string(),
   total_paragraphs: z.number().int().nonnegative(),
   completed_paragraphs: z.number().int().nonnegative(),
+  processing_trace: z.string().default(''),
   upload_text: z.string().nullable().optional(),
   upload_html: z.string().nullable().optional(),
   result: templateSlotExtractionResultSchema.nullable().optional(),

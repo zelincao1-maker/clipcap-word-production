@@ -13,6 +13,8 @@ import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 const EXTRACTION_TIMEOUT_MS = 120000;
 const EXTRACTION_MAX_RETRIES = 2;
 const MIN_PARAGRAPH_CHARACTER_COUNT = 6;
+const TEMPLATE_EXTRACTION_LLM_CONCURRENCY = 6;
+const EXTRACTION_WAIT_HEARTBEAT_MS = 15000;
 
 const EXTRACTION_SYSTEM_PROMPT = `
 你是中文法律文书模板槽位抽取助手。
@@ -71,6 +73,7 @@ interface ExtractTemplateSlotsFromDocxParams {
   prompt: string;
   fileName: string;
   onParagraphComplete?: (progress: ParagraphProgress) => Promise<void> | void;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
 }
 
 function wait(ms: number) {
@@ -109,12 +112,87 @@ function normalizeJsonText(rawContent: string) {
   return withoutCodeFence;
 }
 
-async function requestTextLlmJson(prompt: string) {
+function formatElapsedMs(ms: number) {
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function stringifyTraceJson(value: unknown) {
+  return JSON.stringify(value);
+}
+
+function buildTraceErrorDetails(error: unknown, extra?: Record<string, unknown>) {
+  if (error instanceof Error) {
+    const cause = (error as Error & { cause?: unknown }).cause;
+    const causeRecord =
+      cause && typeof cause === 'object' ? (cause as Record<string, unknown>) : null;
+
+    return {
+      errorName: error.name,
+      errorMessage: error.message,
+      errorStack: error.stack ?? null,
+      errorCause:
+        typeof cause === 'string'
+          ? cause
+          : causeRecord && typeof causeRecord.message === 'string'
+            ? causeRecord.message
+            : null,
+      errorCode: causeRecord && typeof causeRecord.code === 'string' ? causeRecord.code : null,
+      errorErrno:
+        causeRecord && typeof causeRecord.errno === 'number' ? causeRecord.errno : null,
+      errorSyscall:
+        causeRecord && typeof causeRecord.syscall === 'string' ? causeRecord.syscall : null,
+      errorAddress:
+        causeRecord && typeof causeRecord.address === 'string' ? causeRecord.address : null,
+      errorPort: causeRecord && typeof causeRecord.port === 'number' ? causeRecord.port : null,
+      ...(extra ?? {}),
+    };
+  }
+
+  return {
+    errorName: 'UnknownError',
+    errorMessage:
+      typeof error === 'string'
+        ? error
+        : error && typeof error === 'object'
+          ? JSON.stringify(error)
+          : String(error),
+    errorStack: null,
+    ...(extra ?? {}),
+  };
+}
+
+async function requestTextLlmJson(input: {
+  prompt: string;
+  fileName: string;
+  paragraphIndex: number;
+  totalParagraphs: number;
+  paragraphTitle: string;
+  paragraphCharCount: number;
+  concurrency: number;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}) {
+  let lastError: unknown = null;
+
   for (let attempt = 0; attempt <= EXTRACTION_MAX_RETRIES; attempt += 1) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), EXTRACTION_TIMEOUT_MS);
+    const requestStartedAt = Date.now();
+    let heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
 
     try {
+      const startedMessage =
+        `[Template Extract][LLM] Starting paragraph ${input.paragraphIndex + 1}/${input.totalParagraphs} ` +
+        `for ${input.fileName} (attempt ${attempt + 1}/${EXTRACTION_MAX_RETRIES + 1}, concurrency: ${input.concurrency}, paragraph_char_count: ${input.paragraphCharCount}, timeout: ${formatElapsedMs(EXTRACTION_TIMEOUT_MS)}).`;
+      console.log(startedMessage);
+      await input.onTrace?.({ message: startedMessage });
+      heartbeatIntervalId = setInterval(() => {
+        const waitingMessage =
+          `[Template Extract][LLM] Waiting on paragraph ${input.paragraphIndex + 1}/${input.totalParagraphs} ` +
+          `for ${input.fileName} (attempt ${attempt + 1}/${EXTRACTION_MAX_RETRIES + 1}, concurrency: ${input.concurrency}, elapsed: ${formatElapsedMs(Date.now() - requestStartedAt)} / timeout: ${formatElapsedMs(EXTRACTION_TIMEOUT_MS)}, paragraph_char_count: ${input.paragraphCharCount}).`;
+        console.log(waitingMessage);
+        void input.onTrace?.({ message: waitingMessage });
+      }, EXTRACTION_WAIT_HEARTBEAT_MS);
+
       const upstream = await fetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
         method: 'POST',
         headers: {
@@ -131,7 +209,7 @@ async function requestTextLlmJson(prompt: string) {
             },
             {
               role: 'user',
-              content: prompt,
+              content: input.prompt,
             },
           ],
         }),
@@ -145,6 +223,23 @@ async function requestTextLlmJson(prompt: string) {
           upstream.status >= 500;
 
         if (isRetryable && attempt < EXTRACTION_MAX_RETRIES) {
+          const failedMessage =
+            `[Template Extract][LLM] Failed paragraph ${input.paragraphIndex + 1}/${input.totalParagraphs} ` +
+            `for ${input.fileName} (attempt ${attempt + 1}/${EXTRACTION_MAX_RETRIES + 1}, concurrency: ${input.concurrency}) after ${formatElapsedMs(Date.now() - requestStartedAt)}, reason: Text LLM request failed (${upstream.status}): ${details}`;
+          console.error(failedMessage);
+          await input.onTrace?.({ message: failedMessage });
+          await input.onTrace?.({
+            message:
+              `[Template Extract][LLM][ErrorDetails][Paragraph ${input.paragraphIndex + 1}/${input.totalParagraphs}] ` +
+              stringifyTraceJson(
+                buildTraceErrorDetails(new Error(`Text LLM request failed (${upstream.status}): ${details}`), {
+                  fileName: input.fileName,
+                  paragraphIndex: input.paragraphIndex,
+                  totalParagraphs: input.totalParagraphs,
+                  paragraphTitle: input.paragraphTitle,
+                }),
+              ),
+          });
           await wait(1000 * (attempt + 1));
           continue;
         }
@@ -159,26 +254,49 @@ async function requestTextLlmJson(prompt: string) {
         throw new Error('Text LLM returned empty content.');
       }
 
+      const completedMessage =
+        `[Template Extract][LLM] Completed paragraph ${input.paragraphIndex + 1}/${input.totalParagraphs} ` +
+        `for ${input.fileName} (attempt ${attempt + 1}, concurrency: ${input.concurrency}) in ${formatElapsedMs(Date.now() - requestStartedAt)}.`;
+      console.log(completedMessage);
+      await input.onTrace?.({ message: completedMessage });
+
       return normalizeJsonText(rawContent);
     } catch (error) {
       const isTimeout = error instanceof DOMException && error.name === 'AbortError';
+      lastError = error;
+      const failedMessage =
+        `[Template Extract][LLM] Failed paragraph ${input.paragraphIndex + 1}/${input.totalParagraphs} ` +
+        `for ${input.fileName} (attempt ${attempt + 1}/${EXTRACTION_MAX_RETRIES + 1}, concurrency: ${input.concurrency}) after ${formatElapsedMs(Date.now() - requestStartedAt)}, reason: ${error instanceof Error ? error.message : String(error)}`;
+      console.error(failedMessage, error);
+      await input.onTrace?.({ message: failedMessage });
+      await input.onTrace?.({
+        message:
+          `[Template Extract][LLM][ErrorDetails][Paragraph ${input.paragraphIndex + 1}/${input.totalParagraphs}] ` +
+          stringifyTraceJson(
+            buildTraceErrorDetails(error, {
+              fileName: input.fileName,
+              paragraphIndex: input.paragraphIndex,
+              totalParagraphs: input.totalParagraphs,
+              paragraphTitle: input.paragraphTitle,
+            }),
+          ),
+      });
 
       if ((isTimeout || error instanceof TypeError) && attempt < EXTRACTION_MAX_RETRIES) {
         await wait(1000 * (attempt + 1));
         continue;
       }
 
-      if (isTimeout) {
-        throw new Error('Template slot extraction timed out.');
-      }
-
       throw error;
     } finally {
+      if (heartbeatIntervalId) {
+        clearInterval(heartbeatIntervalId);
+      }
       clearTimeout(timeoutId);
     }
   }
 
-  throw new Error('Template slot extraction timed out.');
+  throw (lastError ?? new Error('Template slot extraction failed.'));
 }
 
 export async function extractTextFromDocxBuffer(buffer: Buffer) {
@@ -235,6 +353,9 @@ async function extractSlotsForParagraph(params: {
   fileName: string;
   prompt: string;
   paragraph: ExtractedParagraph;
+  totalParagraphs: number;
+  concurrency: number;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
   const userPrompt = [
     `文件名：${params.fileName}`,
@@ -247,7 +368,16 @@ async function extractSlotsForParagraph(params: {
     params.paragraph.paragraph_text,
   ].join('\n\n');
 
-  const rawJson = await requestTextLlmJson(userPrompt);
+  const rawJson = await requestTextLlmJson({
+    prompt: userPrompt,
+    fileName: params.fileName,
+    paragraphIndex: params.paragraph.paragraph_index,
+    totalParagraphs: params.totalParagraphs,
+    paragraphTitle: params.paragraph.paragraph_title,
+    paragraphCharCount: countMeaningfulCharacters(params.paragraph.paragraph_text),
+    concurrency: params.concurrency,
+    onTrace: params.onTrace,
+  });
   const parsed = JSON.parse(rawJson);
   const object = templateSlotExtractionResultSchema.parse(parsed);
   const extractedParagraph = object.extraction_result[0];
@@ -273,6 +403,7 @@ async function extractParagraphsConcurrently(params: {
   prompt: string;
   paragraphs: ExtractedParagraph[];
   onParagraphComplete?: (progress: ParagraphProgress) => Promise<void> | void;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
   const extractedParagraphs: Array<{
     paragraph_index: number;
@@ -289,24 +420,47 @@ async function extractParagraphsConcurrently(params: {
 
   let completedParagraphs = 0;
   const totalParagraphs = params.paragraphs.length;
+  const concurrency = Math.max(1, Math.min(TEMPLATE_EXTRACTION_LLM_CONCURRENCY, totalParagraphs));
 
-  const results = await Promise.all(
-    params.paragraphs.map(async (paragraph) => {
+  const startedMessage =
+    `[Template Extract] LLM paragraph extraction started for ${params.fileName} ` +
+    `(paragraphs: ${totalParagraphs}, concurrency: ${concurrency}).`;
+  console.log(startedMessage);
+  await params.onTrace?.({ message: startedMessage });
+
+  const results = await runWithConcurrency({
+    items: params.paragraphs,
+    concurrency,
+    worker: async (paragraph) => {
       const result = await extractSlotsForParagraph({
         fileName: params.fileName,
         prompt: params.prompt,
         paragraph,
+        totalParagraphs,
+        concurrency,
+        onTrace: params.onTrace,
       });
 
       completedParagraphs += 1;
+      const progressMessage =
+        `[Template Extract] Paragraph extraction progress for ${params.fileName}: ` +
+        `${completedParagraphs}/${totalParagraphs} paragraphs completed.`;
+      console.log(progressMessage);
+      await params.onTrace?.({ message: progressMessage });
       await params.onParagraphComplete?.({
         completedParagraphs,
         totalParagraphs,
       });
 
       return result;
-    }),
-  );
+    },
+  });
+
+  const completedMessage =
+    `[Template Extract] LLM paragraph extraction completed for ${params.fileName} ` +
+    `(paragraphs: ${totalParagraphs}, concurrency: ${concurrency}).`;
+  console.log(completedMessage);
+  await params.onTrace?.({ message: completedMessage });
 
   for (const result of results) {
     if (!result || result.items.length === 0) {
@@ -345,11 +499,28 @@ export async function extractTemplateSlotsFromDocx(
     throw new Error('No extractable paragraphs were found in the DOCX file.');
   }
 
+  await params.onTrace?.({
+    message:
+      `[Template Extract][PromptPreview] ` +
+      stringifyTraceJson({
+        route: '/api/template-extraction-tasks/[taskId]/process',
+        model: getTextLlmModel(),
+        file_name: params.fileName,
+        paragraph_count: extractableParagraphs.length,
+        concurrency: Math.max(
+          1,
+          Math.min(TEMPLATE_EXTRACTION_LLM_CONCURRENCY, extractableParagraphs.length),
+        ),
+        extra_prompt: params.prompt,
+      }),
+  });
+
   const extractedParagraphs = await extractParagraphsConcurrently({
     fileName: params.fileName,
     prompt: params.prompt,
     paragraphs: extractableParagraphs,
     onParagraphComplete: params.onParagraphComplete,
+    onTrace: params.onTrace,
   });
 
   extractedParagraphs.sort((left, right) => left.paragraph_index - right.paragraph_index);
@@ -372,4 +543,36 @@ export async function extractTemplateSlotsFromDocx(
     uploadHtml,
     totalParagraphs: extractableParagraphs.length,
   };
+}
+
+async function runWithConcurrency<TInput, TOutput>(params: {
+  items: TInput[];
+  concurrency: number;
+  worker: (item: TInput, index: number) => Promise<TOutput>;
+}) {
+  const { items, concurrency, worker } = params;
+
+  if (items.length === 0) {
+    return [] as TOutput[];
+  }
+
+  const results = new Array<TOutput>(items.length);
+  let nextIndex = 0;
+
+  async function consume() {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+
+      if (currentIndex >= items.length) {
+        return;
+      }
+
+      results[currentIndex] = await worker(items[currentIndex] as TInput, currentIndex);
+    }
+  }
+
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: workerCount }, () => consume()));
+  return results;
 }

@@ -7,6 +7,17 @@ import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
+async function appendProcessingTrace(
+  admin: ReturnType<typeof createSupabaseAdminClient>,
+  taskId: string,
+  message: string,
+) {
+  await admin.rpc('append_template_extraction_task_processing_trace', {
+    p_task_id: taskId,
+    p_entry: `[${new Date().toISOString()}] ${message}`,
+  });
+}
+
 function createUnauthorizedResponse() {
   return NextResponse.json(
     {
@@ -37,7 +48,7 @@ export async function POST(
     const { data: task, error } = await supabase
       .from('template_extraction_tasks')
       .select(
-        'id, owner_id, source_docx_name, source_docx_base64, prompt, status, total_paragraphs, completed_paragraphs',
+        'id, owner_id, source_docx_name, source_docx_base64, prompt, status, total_paragraphs, completed_paragraphs, processing_trace',
       )
       .eq('id', taskId)
       .eq('owner_id', user.id)
@@ -80,12 +91,19 @@ export async function POST(
       .update({
         status: 'running',
         completed_paragraphs: 0,
+        processing_trace: '',
         error_message: null,
         started_at: new Date().toISOString(),
         finished_at: null,
         updated_at: new Date().toISOString(),
       })
       .eq('id', task.id);
+
+    await appendProcessingTrace(
+      admin,
+      task.id,
+      `槽位抽取路由：/api/template-extraction-tasks/${task.id}/process`,
+    );
 
     await logEvent({
       ownerId: user.id,
@@ -108,6 +126,9 @@ export async function POST(
       buffer,
       fileName: task.source_docx_name,
       prompt: task.prompt ?? '',
+      onTrace: async (entry) => {
+        await appendProcessingTrace(admin, task.id, entry.message);
+      },
       onParagraphComplete: async ({ completedParagraphs, totalParagraphs }) => {
         if (completedParagraphs === lastPersistedCompletedParagraphs) {
           return;
@@ -189,6 +210,20 @@ export async function POST(
       },
     });
   } catch (error) {
+    await appendProcessingTrace(
+      admin,
+      taskId,
+      `槽位抽取失败：${error instanceof Error ? error.message : String(error)}`,
+    );
+    await appendProcessingTrace(
+      admin,
+      taskId,
+      `[RouteErrorDetails][TemplateExtraction] ${JSON.stringify(
+        buildErrorLogPayload(error, {
+          taskId,
+        }),
+      )}`,
+    );
     await admin
       .from('template_extraction_tasks')
       .update({

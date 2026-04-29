@@ -32,7 +32,7 @@ export async function GET(
     const { data: task, error } = await supabase
       .from('template_extraction_tasks')
       .select(
-        'id, status, source_docx_name, prompt, total_paragraphs, completed_paragraphs, upload_text, upload_html, result, error_message, created_at, started_at, finished_at',
+        'id, status, source_docx_name, prompt, total_paragraphs, completed_paragraphs, processing_trace, upload_text, upload_html, result, error_message, created_at, started_at, finished_at',
       )
       .eq('id', taskId)
       .eq('owner_id', user.id)
