@@ -73,6 +73,19 @@ declare global {
         content: string;
       };
     }>;
+    clipcapSlotFillPrompts?: Array<{
+      fileName: string;
+      label: string;
+      data: {
+        route?: string;
+        model?: string;
+        request_label?: string;
+        messages?: Array<{
+          role: string;
+          content: unknown;
+        }>;
+      };
+    }>;
   }
 }
 
@@ -229,15 +242,15 @@ function getStatusLabel(status: string) {
     case 'pending':
       return '等待中';
     case 'uploaded':
-      return '已处理';
+      return '处理中';
     case 'running':
-      return '已处理';
+      return '处理中';
     case 'ocr_running':
-      return '已处理';
+      return '处理中';
     case 'ocr_completed':
-      return '已处理';
+      return '处理中';
     case 'slot_filling':
-      return '已处理';
+      return '处理中';
     case 'review_pending':
       return '待核查';
     case 'reviewed':
@@ -414,6 +427,9 @@ export function BatchGenerateModal({
 
       launchedOcrItemIdsRef.current.add(item.id);
       itemStartedAtRef.current.set(item.id, Date.now());
+      console.info(
+        `[Batch Generate][${item.source_pdf_name}] Starting OCR for task item ${item.id} via /api/generation-task-items/${item.id}/ocr.`,
+      );
 
       void processGenerationTaskItemMutation
         .mutateAsync(item.id)
@@ -450,7 +466,7 @@ export function BatchGenerateModal({
       }
 
       console.info(
-        `[Batch Generate][${item.source_pdf_name}] OCR completed detected by polling; starting slot fill for task item ${item.id}.`,
+        `[Batch Generate][${item.source_pdf_name}] OCR completed detected by polling; starting slot fill for task item ${item.id} via /api/generation-task-items/${item.id}/slot-fill.`,
       );
       launchedSlotFillItemIdsRef.current.add(item.id);
 
@@ -458,7 +474,7 @@ export function BatchGenerateModal({
         .mutateAsync(item.id)
         .then(() => {
           console.info(
-            `[Batch Generate][${item.source_pdf_name}] Slot fill request accepted for task item ${item.id}.`,
+            `[Batch Generate][${item.source_pdf_name}] Slot fill request accepted for task item ${item.id} via /api/generation-task-items/${item.id}/slot-fill.`,
           );
           void refreshTaskLists();
         })
@@ -509,6 +525,9 @@ export function BatchGenerateModal({
         const ocrPageDataMatch = line.match(/^\[PDF Fill\]\[OCR\]\[PageData (\d+)\] (.+)$/);
         const slotFillInputMatch = line.match(
           /^(?:\[PDF Fill\])?\[TextInputData\]\[(.+)\] (.+)$/,
+        );
+        const slotFillPromptMatch = line.match(
+          /^(?:\[PDF Fill\])?\[TextPrompt\]\[(.+)\] (.+)$/,
         );
 
         if (ocrPageDataMatch) {
@@ -581,6 +600,45 @@ export function BatchGenerateModal({
 
           console.info(
             `[Batch Generate][${item.source_pdf_name}] Slot fill input stored in window.clipcapSlotFillInputs (${label}).`,
+          );
+          return;
+        }
+
+        if (slotFillPromptMatch) {
+          const label = slotFillPromptMatch[1] ?? 'Full';
+          const parsedPrompt = JSON.parse(slotFillPromptMatch[2] ?? '{}') as {
+            route?: string;
+            model?: string;
+            request_label?: string;
+            messages?: Array<{
+              role: string;
+              content: unknown;
+            }>;
+          };
+          const currentEntries = window.clipcapSlotFillPrompts ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) => !(entry.fileName === item.source_pdf_name && entry.label === label),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            label,
+            data: parsedPrompt,
+          });
+
+          window.clipcapSlotFillPrompts = nextEntries.sort((left, right) => {
+            if (left.fileName === right.fileName) {
+              return left.label.localeCompare(right.label);
+            }
+
+            return left.fileName.localeCompare(right.fileName);
+          });
+
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill prompt via ${
+              parsedPrompt.route ?? '/api/generation-task-items/[taskItemId]/slot-fill'
+            } (${label})`,
+            parsedPrompt,
           );
           return;
         }
@@ -1063,7 +1121,7 @@ export function BatchGenerateModal({
                         <Badge color={getStatusColor(item.status)} radius="sm" variant="light">
                           {getStatusLabel(item.status)}
                         </Badge>
-                        <Text size="sm">已处理 {elapsedSeconds} 秒</Text>
+                        <Text size="sm">处理中 {elapsedSeconds} 秒</Text>
                       </Group>
                     </Group>
 

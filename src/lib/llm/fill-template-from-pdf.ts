@@ -294,6 +294,42 @@ function stringifyTraceJson(value: unknown) {
   return JSON.stringify(value);
 }
 
+function buildTextSlotFillPromptPayload(input: {
+  documentName: string;
+  slots: GenerationSlotSchemaItem[];
+  pageNumbers: number[];
+  chunkText: string;
+}) {
+  return {
+    document_name: input.documentName,
+    slot_names: input.slots.map((slot) => slot.field_category),
+    slot_definitions: input.slots.map((slot) => ({
+      slot_key: slot.slot_key,
+      slot_name: slot.field_category,
+      slot_meaning:
+        slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
+    })),
+    strict_requirement:
+      'Return the exact same slot_key copied from slot_definitions. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
+    page_numbers: input.pageNumbers,
+    content: input.chunkText,
+    output_schema: {
+      results: input.slots.map((slot) => ({
+        slot_key: slot.slot_key,
+        slot_name: slot.field_category,
+        final_value: 'final extracted value',
+        matches: [
+          {
+            value: 'matched value',
+            snippet: 'short supporting quote from the PDF text',
+            page_number: 1,
+          },
+        ],
+      })),
+    },
+  };
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1221,6 +1257,30 @@ async function extractAllSlotsWithTextModel(input: {
 
     try {
       const requestLabel = input.requestLabel ?? 'full-text slot request';
+      const promptPayload = buildTextSlotFillPromptPayload({
+        documentName: input.documentName,
+        slots: input.slots,
+        pageNumbers: input.pageNumbers,
+        chunkText: input.chunkText,
+      });
+      await input.onTrace?.({
+        message: `[PDF Fill][TextPrompt][${requestLabel}] ${stringifyTraceJson({
+          route: '/api/generation-task-items/[taskItemId]/slot-fill',
+          model: getTextLlmModel(),
+          request_label: requestLabel,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a PDF slot filling assistant. Extract slot values from the provided PDF text chunk. Return JSON only.',
+            },
+            {
+              role: 'user',
+              content: promptPayload,
+            },
+          ],
+        })}`,
+      });
       const requestStartedMessage =
         `[PDF Fill][Text] Starting ${requestLabel} for ${input.documentName} ` +
         `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}, timeout: ${formatElapsedMs(requestTimeoutMs)}${formatProcessBudgetSuffix({

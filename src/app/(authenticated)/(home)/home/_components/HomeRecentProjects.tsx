@@ -85,15 +85,15 @@ function getTaskStatusLabel(status: string) {
     case 'failed':
       return '处理失败';
     case 'running':
-      return '已处理';
+      return '处理中';
     case 'ocr_running':
-      return '已处理';
+      return '处理中';
     case 'ocr_completed':
-      return '已处理';
+      return '处理中';
     case 'slot_filling':
-      return '已处理';
+      return '处理中';
     case 'uploaded':
-      return '已处理';
+      return '处理中';
     default:
       return status;
   }
