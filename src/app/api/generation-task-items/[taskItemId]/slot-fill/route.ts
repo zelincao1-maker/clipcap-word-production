@@ -64,7 +64,17 @@ async function runGenerationTaskItemSlotFill(params: {
       slotCount: slotSchema.length,
       textPageCount: pages.length,
     });
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `槽位回填路由：/api/generation-task-items/${params.item.id}/slot-fill`,
+    );
     await appendProcessingTrace(admin, params.item.id, llmStartMessage);
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      '槽位回填阶段：正在组装 Prompt，并准备向 LLM 发起请求。',
+    );
 
     let lastLoggedCompletedSlots = -1;
 

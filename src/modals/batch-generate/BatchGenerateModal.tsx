@@ -17,7 +17,7 @@ import {
 import type { ContextModalProps } from '@mantine/modals';
 import { notifications } from '@mantine/notifications';
 import { useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationTaskItemSummary } from '@/src/app/api/types/generation-task';
 import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
 import { parsePdf, renderPdfPagesForVision } from '@/src/lib/pdf/client-pdf';
@@ -306,6 +306,47 @@ export function BatchGenerateModal({
       queryClient.invalidateQueries({ queryKey: ['saved-templates'] }),
     ]);
   };
+  const launchSlotFillForItem = useCallback(
+    (item: GenerationTaskItemSummary, trigger: 'polling' | 'trace') => {
+      if (launchedSlotFillItemIdsRef.current.has(item.id)) {
+        console.log(
+          `[Batch Generate][${item.source_pdf_name}] Slot fill launch skipped for task item ${item.id}; already launched previously (trigger: ${trigger}, current status: ${item.status}).`,
+        );
+        return;
+      }
+
+      console.log(
+        `[Batch Generate][${item.source_pdf_name}] Starting slot fill for task item ${item.id} via /api/generation-task-items/${item.id}/slot-fill (trigger: ${trigger}, current status: ${item.status}).`,
+      );
+      launchedSlotFillItemIdsRef.current.add(item.id);
+
+      void startGenerationTaskItemSlotFillMutation
+        .mutateAsync(item.id)
+        .then(() => {
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill request accepted for task item ${item.id} via /api/generation-task-items/${item.id}/slot-fill (trigger: ${trigger}).`,
+          );
+          void refreshTaskLists();
+        })
+        .catch((error) => {
+          console.error(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill request failed for task item ${item.id} (trigger: ${trigger}).`,
+            error,
+          );
+          notifications.show({
+            color: 'red',
+            title: '槽位回填失败',
+            message:
+              error instanceof Error
+                ? `${item.source_pdf_name}：${error.message}`
+                : `${item.source_pdf_name} 槽位回填启动失败，请稍后重试。`,
+          });
+
+          void refreshTaskLists();
+        });
+    },
+    [startGenerationTaskItemSlotFillMutation],
+  );
 
   const rowsWithFiles = rows.filter((row): row is UploadRow & { file: File } => Boolean(row.file));
   const hasParsingRows = rowsWithFiles.some((row) => row.isParsing);
@@ -427,7 +468,7 @@ export function BatchGenerateModal({
 
       launchedOcrItemIdsRef.current.add(item.id);
       itemStartedAtRef.current.set(item.id, Date.now());
-      console.info(
+      console.log(
         `[Batch Generate][${item.source_pdf_name}] Starting OCR for task item ${item.id} via /api/generation-task-items/${item.id}/ocr.`,
       );
 
@@ -461,41 +502,12 @@ export function BatchGenerateModal({
         return;
       }
 
-      if (launchedSlotFillItemIdsRef.current.has(item.id)) {
-        return;
-      }
-
-      console.info(
-        `[Batch Generate][${item.source_pdf_name}] OCR completed detected by polling; starting slot fill for task item ${item.id} via /api/generation-task-items/${item.id}/slot-fill.`,
+      console.log(
+        `[Batch Generate][${item.source_pdf_name}] OCR completed detected by polling for task item ${item.id}; current status is ${item.status}.`,
       );
-      launchedSlotFillItemIdsRef.current.add(item.id);
-
-      void startGenerationTaskItemSlotFillMutation
-        .mutateAsync(item.id)
-        .then(() => {
-          console.info(
-            `[Batch Generate][${item.source_pdf_name}] Slot fill request accepted for task item ${item.id} via /api/generation-task-items/${item.id}/slot-fill.`,
-          );
-          void refreshTaskLists();
-        })
-        .catch((error) => {
-          console.error(
-            `[Batch Generate][${item.source_pdf_name}] Slot fill request failed for task item ${item.id}.`,
-            error,
-          );
-          notifications.show({
-            color: 'red',
-            title: '槽位回填失败',
-            message:
-              error instanceof Error
-                ? `${item.source_pdf_name}：${error.message}`
-                : `${item.source_pdf_name} 槽位回填启动失败，请稍后重试。`,
-          });
-
-          void refreshTaskLists();
-        });
+      launchSlotFillForItem(item, 'polling');
     });
-  }, [startGenerationTaskItemSlotFillMutation, taskId, taskQuery.data]);
+  }, [launchSlotFillForItem, taskId, taskQuery.data]);
 
   useEffect(() => {
     if (!taskQuery.data) {
@@ -598,7 +610,7 @@ export function BatchGenerateModal({
             return left.fileName.localeCompare(right.fileName);
           });
 
-          console.info(
+          console.log(
             `[Batch Generate][${item.source_pdf_name}] Slot fill input stored in window.clipcapSlotFillInputs (${label}).`,
           );
           return;
@@ -634,12 +646,29 @@ export function BatchGenerateModal({
             return left.fileName.localeCompare(right.fileName);
           });
 
-          console.info(
+          console.log(
             `[Batch Generate][${item.source_pdf_name}] Slot fill prompt via ${
               parsedPrompt.route ?? '/api/generation-task-items/[taskItemId]/slot-fill'
             } (${label})`,
             parsedPrompt,
           );
+          return;
+        }
+
+        if (
+          line.includes('[PDF Fill][Text]') ||
+          line.includes('Text slot fill') ||
+          line.includes('槽位回填')
+        ) {
+          console.log(`[Batch Generate][${item.source_pdf_name}] ${line}`);
+          return;
+        }
+
+        if (line.includes('OCR 已完成，前端轮询检测到后将自动启动槽位回填')) {
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] OCR completion trace observed for task item ${item.id}; current polled status is ${item.status}.`,
+          );
+          launchSlotFillForItem(item, 'trace');
           return;
         }
 
@@ -654,7 +683,7 @@ export function BatchGenerateModal({
         itemTraceRef.current.delete(itemId);
       }
     });
-  }, [taskQuery.data]);
+  }, [launchSlotFillForItem, taskQuery.data]);
 
   const updateRow = (rowId: string, patch: Partial<UploadRow>) => {
     setRows((currentRows) =>

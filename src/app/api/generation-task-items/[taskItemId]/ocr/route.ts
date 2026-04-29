@@ -71,6 +71,11 @@ async function runGenerationTaskItemOcr(params: {
       params.item.id,
       `开始 OCR：${params.item.source_pdf_name}，共 ${slotSchema.length} 个槽位。`,
     );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `OCR 路由：/api/generation-task-items/${params.item.id}/ocr`,
+    );
 
     await admin
       .from('generation_tasks')
@@ -169,6 +174,11 @@ async function runGenerationTaskItemOcr(params: {
       admin,
       params.item.id,
       'OCR 已完成，前端轮询检测到后将自动启动槽位回填。',
+    );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `下一步路由：/api/generation-task-items/${params.item.id}/slot-fill`,
     );
 
     await logEvent({
