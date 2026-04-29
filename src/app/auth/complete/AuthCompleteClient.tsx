@@ -1,16 +1,11 @@
 'use client';
 
-import { Button, Card, Group, Stack, Text, Title } from '@mantine/core';
-import Link from 'next/link';
+import { Button, Card, Stack, Text, Title } from '@mantine/core';
 import { useEffect, useState } from 'react';
 import { publishAuthSyncEvent } from '@/src/lib/auth/auth-sync';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 
-type AuthCompleteClientProps = {
-  nextPath: string;
-};
-
-export function AuthCompleteClient({ nextPath }: AuthCompleteClientProps) {
+export function AuthCompleteClient() {
   const [isAutoCloseAttempted, setIsAutoCloseAttempted] = useState(false);
 
   useEffect(() => {
@@ -78,23 +73,19 @@ export function AuthCompleteClient({ nextPath }: AuthCompleteClientProps) {
             <Text c="teal.4" fw={800} size="lg">
               ClipCap
             </Text>
-            <Title order={2}>登录已完成</Title>
+            <Title order={2}>登录完成</Title>
             <Text c="dimmed" size="sm">
-              已经把登录状态同步回原来的页面。当前这个回调页会自动尝试关闭，如果浏览器拦截了关闭操作，可以手动关闭当前页。
+              原来的 ClipCap 页面现在应该已经同步成登录成功状态了。这个页签只是登录完成提示页，可以直接关闭。
             </Text>
           </Stack>
 
           {isAutoCloseAttempted ? (
-            <Group grow>
+            <Stack gap="xs">
+              <Text c="dimmed" size="sm">
+                如果浏览器没有自动关闭当前页，请点击下面按钮关闭它，然后回到原来的 ClipCap 页面继续使用。
+              </Text>
               <Button
-                component={Link}
-                href={nextPath}
-                radius="xl"
-                variant="default"
-              >
-                继续进入
-              </Button>
-              <Button
+                fullWidth
                 radius="xl"
                 onClick={() => {
                   window.close();
@@ -102,7 +93,7 @@ export function AuthCompleteClient({ nextPath }: AuthCompleteClientProps) {
               >
                 关闭当前页
               </Button>
-            </Group>
+            </Stack>
           ) : null}
         </Stack>
       </Card>
