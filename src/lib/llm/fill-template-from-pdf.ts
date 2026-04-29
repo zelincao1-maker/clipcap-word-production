@@ -1606,7 +1606,8 @@ export async function extractPdfTextFromVisionPages(params: {
   } catch (error) {
     const ocrElapsedMs = Date.now() - ocrStartedAt;
     const ocrFailedMessage =
-      `[PDF Fill] OCR failed for ${params.pdfFileName} after ${formatElapsedMs(ocrElapsedMs)}.`;
+      `[PDF Fill] OCR failed for ${params.pdfFileName} after ${formatElapsedMs(ocrElapsedMs)}: ` +
+      `${getErrorMessage(error)}`;
     console.error(ocrFailedMessage, error);
     await params.onTrace?.({ message: ocrFailedMessage });
     throw error;

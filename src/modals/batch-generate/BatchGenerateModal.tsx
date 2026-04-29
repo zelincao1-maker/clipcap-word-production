@@ -740,6 +740,28 @@ export function BatchGenerateModal({
         }
 
         if (
+          line.includes('[PDF Fill] OCR failed') ||
+          line.includes('[PDF Fill][OCR] Failed batch') ||
+          line.includes('[PDF Fill][OCR] Continuing after failed batch') ||
+          line.includes('OCR 失败')
+        ) {
+          console.error(`[Batch Generate][${item.source_pdf_name}] ${line}`);
+          return;
+        }
+
+        if (
+          line.includes('[PDF Fill][Text] Failed') ||
+          line.includes('Text slot fill failed') ||
+          line.includes('模型自动回填失败') ||
+          line.includes('upstream fetch failed') ||
+          line.includes('Text model request failed') ||
+          line.includes('Vision model request failed')
+        ) {
+          console.error(`[Batch Generate][${item.source_pdf_name}] ${line}`);
+          return;
+        }
+
+        if (
           line.includes('[PDF Fill][Text]') ||
           line.includes('Text slot fill') ||
           line.includes('槽位回填')
