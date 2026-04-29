@@ -18,7 +18,7 @@ export interface PdfVisionPageInput {
   imageDataUrl: string;
 }
 
-const OCR_RENDER_SCALE = 6.0;
+const OCR_RENDER_SCALE = 4.0;
 const OCR_IMAGE_FORMAT = 'image/png';
 const OCR_IMAGE_JPEG_QUALITY = 0.92;
 

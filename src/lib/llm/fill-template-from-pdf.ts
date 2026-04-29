@@ -1426,142 +1426,22 @@ async function fillSlotsFromTextPages(params: {
     message: `[PDF Fill][TextInputData][Full] ${stringifyTraceJson(fullTextInputPayload)}`,
   });
 
-  const strategy = chooseTextSlotFillStrategy({
-    slotCount: params.slots.length,
-    pageCount: allPageNumbers.length,
-    charCount: fullDocumentText.length,
-  });
-  const strategyMessage = strategy.useSlotBatches
-    ? `[PDF Fill] Text slot fill strategy for ${params.pdfFileName}: slot-batched upfront (${strategy.reasons.join(', ')}).`
-    : `[PDF Fill] Text slot fill strategy for ${params.pdfFileName}: full-text all-slot request.`;
+  const strategyMessage = `[PDF Fill] Text slot fill strategy for ${params.pdfFileName}: full-text all-slot request.`;
   console.info(strategyMessage);
   await params.onTrace?.({ message: strategyMessage });
 
-  if (!strategy.useSlotBatches) {
-    try {
-      const fullDocumentResult = await extractAllSlotsWithTextModel({
-        documentName: params.pdfFileName,
-        slots: params.slots,
-        pageNumbers: allPageNumbers,
-        chunkText: fullDocumentText,
-        requestLabel: 'full-text all-slot request',
-        onTrace: params.onTrace,
-        processStartedAtMs: params.processStartedAtMs,
-        processHardTimeoutMs: params.processHardTimeoutMs,
-      });
-      const completedSlots = fullDocumentResult.extracted_items.filter((item) =>
-        hasFilledValue(item.original_value),
-      ).length;
-
-      await params.onProgress?.({
-        completedSlots,
-        totalSlots: params.slots.length,
-      });
-
-      return fullDocumentResult;
-    } catch (error) {
-      const shouldFallback =
-        error instanceof Error &&
-        (error.message.includes('Text slot extraction timed out') ||
-          error.message.includes('Text model request failed'));
-
-      if (!shouldFallback) {
-        throw error;
-      }
-
-      const fallbackMessage =
-        `[PDF Fill] Full-text all-slot extraction timed out for ${params.pdfFileName}; ` +
-        `falling back to slot batches of ${MAX_TEXT_SLOTS_PER_REQUEST} with concurrency ${MAX_TEXT_SLOT_BATCH_CONCURRENCY}.`;
-      console.info(fallbackMessage);
-      await params.onTrace?.({ message: fallbackMessage });
-    }
-  }
-
-  const slotBatches = buildSlotBatches(params.slots, MAX_TEXT_SLOTS_PER_REQUEST);
-  const batchResults = await runWithConcurrencySettled({
-    items: slotBatches,
-    concurrency: MAX_TEXT_SLOT_BATCH_CONCURRENCY,
-    worker: async (slotBatch, index) => {
-      const batchStartedMessage =
-        `[PDF Fill][Text Fallback] Starting slot batch ${index + 1}/${slotBatches.length} ` +
-        `for ${params.pdfFileName} (slots: ${slotBatch.length}).`;
-      console.info(batchStartedMessage);
-      await params.onTrace?.({ message: batchStartedMessage });
-      await params.onTrace?.({
-        message:
-          `[PDF Fill][TextInputData][Fallback Batch ${index + 1}/${slotBatches.length}] ` +
-          stringifyTraceJson({
-            document_name: params.pdfFileName,
-            page_numbers: allPageNumbers,
-            slot_definitions: slotBatch.map((slot) => ({
-              slot_key: slot.slot_key,
-              slot_name: slot.field_category,
-              slot_meaning:
-                slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
-            })),
-            content: fullDocumentText,
-          }),
-      });
-
-      const batchResult = await extractAllSlotsWithTextModel({
-        documentName: params.pdfFileName,
-        slots: slotBatch,
-        pageNumbers: allPageNumbers,
-        chunkText: fullDocumentText,
-        requestLabel: `slot batch ${index + 1}/${slotBatches.length}`,
-        onTrace: params.onTrace,
-        processStartedAtMs: params.processStartedAtMs,
-        processHardTimeoutMs: params.processHardTimeoutMs,
-      });
-
-      const batchCompletedMessage =
-        `[PDF Fill][Text Fallback] Completed slot batch ${index + 1}/${slotBatches.length} ` +
-        `for ${params.pdfFileName}.`;
-      console.info(batchCompletedMessage);
-      await params.onTrace?.({ message: batchCompletedMessage });
-
-      return batchResult;
-    },
+  const fullDocumentResult = await extractAllSlotsWithTextModel({
+    documentName: params.pdfFileName,
+    slots: params.slots,
+    pageNumbers: allPageNumbers,
+    chunkText: fullDocumentText,
+    requestLabel: 'full-text all-slot request',
+    onTrace: params.onTrace,
+    processStartedAtMs: params.processStartedAtMs,
+    processHardTimeoutMs: params.processHardTimeoutMs,
   });
 
-  const successfulBatchResults: z.infer<typeof generationPdfFillResultSchema>[] = [];
-  const failedBatchResults: Array<{ index: number; error: unknown }> = [];
-
-  for (const batchResult of batchResults) {
-    if (batchResult.ok) {
-      successfulBatchResults.push(batchResult.value);
-      continue;
-    }
-
-    failedBatchResults.push({
-      index: batchResult.index,
-      error: batchResult.error,
-    });
-  }
-
-  if (failedBatchResults.length > 0) {
-    for (const failedBatchResult of failedBatchResults) {
-      const failedBatchMessage =
-        `[PDF Fill][Text Fallback] Continuing after failed slot batch ${failedBatchResult.index + 1}/${slotBatches.length} ` +
-        `for ${params.pdfFileName}: ${getErrorMessage(failedBatchResult.error)}`;
-      console.error(failedBatchMessage, failedBatchResult.error);
-      await params.onTrace?.({ message: failedBatchMessage });
-    }
-
-    const partialSummaryMessage =
-      `[PDF Fill][Text Fallback] Partial success for ${params.pdfFileName}: ` +
-      `${successfulBatchResults.length}/${slotBatches.length} slot batches succeeded, ` +
-      `${failedBatchResults.length} failed. Failed-batch slots will be left empty for manual review.`;
-    console.info(partialSummaryMessage);
-    await params.onTrace?.({ message: partialSummaryMessage });
-  }
-
-  if (successfulBatchResults.length === 0) {
-    throw new Error('All slot-fill batches failed; no automatic slot values were extracted.');
-  }
-
-  const mergedResult = mergeSlotResults(params.slots, successfulBatchResults);
-  const completedSlots = mergedResult.extracted_items.filter((item) =>
+  const completedSlots = fullDocumentResult.extracted_items.filter((item) =>
     hasFilledValue(item.original_value),
   ).length;
 
@@ -1570,7 +1450,7 @@ async function fillSlotsFromTextPages(params: {
     totalSlots: params.slots.length,
   });
 
-  return mergedResult;
+  return fullDocumentResult;
 }
 
 async function runWithConcurrency<TInput, TOutput>(params: {
