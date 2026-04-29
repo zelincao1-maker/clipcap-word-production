@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { Agent } from 'undici';
 import {
   getTextLlmApiKey,
   getTextLlmBaseUrl,
@@ -72,6 +73,15 @@ const MAX_TEXT_SLOT_BATCH_CONCURRENCY = 2;
 const MAX_TEXT_SLOTS_PER_REQUEST = 10;
 const PROCESS_HARD_TIMEOUT_MS = 300000;
 const PROCESS_OCR_SLOT_FILL_RESERVE_MS = 60000;
+const LLM_CONNECT_TIMEOUT_MS = 30000;
+type RequestInitWithDispatcher = RequestInit & {
+  dispatcher?: Agent;
+};
+const llmFetchDispatcher = new Agent({
+  connect: {
+    timeout: LLM_CONNECT_TIMEOUT_MS,
+  },
+});
 
 function normalizeJsonText(rawContent: string) {
   const trimmed = rawContent.trim();
@@ -444,6 +454,7 @@ function shouldRetryVisionRequest(error: unknown) {
   }
 
   return (
+    error.message.includes('fetch failed') ||
     error.message.includes('Vision model request failed (429)') ||
     error.message.includes('Vision model request failed (500)') ||
     error.message.includes('Vision model request failed (502)') ||
@@ -462,6 +473,7 @@ function shouldRetryTextRequest(error: unknown) {
   }
 
   return (
+    error.message.includes('fetch failed') ||
     error.message.includes('Text model request failed (429)') ||
     error.message.includes('Text model request failed (500)') ||
     error.message.includes('Text model request failed (502)') ||
@@ -607,6 +619,7 @@ async function extractSlotWithTextModel(input: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${getTextLlmApiKey()}`,
         },
+        dispatcher: llmFetchDispatcher,
         signal: controller.signal,
         body: JSON.stringify({
           model: getTextLlmModel(),
@@ -648,7 +661,7 @@ async function extractSlotWithTextModel(input: {
             },
           ],
         }),
-      });
+      } as RequestInitWithDispatcher);
 
       if (!upstream.ok) {
         const details = await upstream.text();
@@ -880,6 +893,7 @@ async function extractTextFromVisionPages(input: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${getVisionLlmApiKey()}`,
         },
+        dispatcher: llmFetchDispatcher,
         signal: controller.signal,
         body: JSON.stringify({
           model: getVisionLlmModel(),
@@ -895,7 +909,7 @@ async function extractTextFromVisionPages(input: {
             },
           ],
         }),
-      });
+      } as RequestInitWithDispatcher);
 
       if (!upstream.ok) {
         const details = await upstream.text();
@@ -1348,6 +1362,7 @@ async function extractAllSlotsWithTextModel(input: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${getTextLlmApiKey()}`,
         },
+        dispatcher: llmFetchDispatcher,
         signal: controller.signal,
         body: JSON.stringify({
           model: getTextLlmModel(),
@@ -1390,7 +1405,7 @@ async function extractAllSlotsWithTextModel(input: {
             },
           ],
         }),
-      });
+      } as RequestInitWithDispatcher);
 
       if (!upstream.ok) {
         const details = await upstream.text();
