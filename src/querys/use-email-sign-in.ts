@@ -28,7 +28,7 @@ export function useEmailSignIn() {
       };
 
       if (!response.ok) {
-        throw new Error(payload.message ?? '邮箱登录失败，请稍后重试。');
+        throw new Error(payload.message ?? (response.statusText || 'Unknown error'));
       }
 
       return payload;

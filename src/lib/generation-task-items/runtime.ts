@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
 import type {
   GenerationSlotSchemaItem,
   PdfPageInput,
@@ -60,29 +61,7 @@ export function createUnauthorizedResponse() {
 }
 
 export function getErrorMessage(error: unknown) {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  if (typeof error === 'string') {
-    return error;
-  }
-
-  if (error && typeof error === 'object') {
-    const errorRecord = error as Record<string, unknown>;
-
-    if (typeof errorRecord.message === 'string' && errorRecord.message.trim().length > 0) {
-      return errorRecord.message;
-    }
-
-    try {
-      return JSON.stringify(errorRecord);
-    } catch {
-      return String(errorRecord);
-    }
-  }
-
-  return '处理任务时发生未知错误。';
+  return getRawErrorMessage(error);
 }
 
 export function buildFallbackReviewPayload(slotSchema: GenerationSlotSchemaItem[]) {
@@ -199,7 +178,7 @@ export async function loadVisionPagesFromStoredAssets(params: {
         .download(asset.storage_path);
 
       if (error || !fileBlob) {
-        throw error ?? new Error(`无法下载 OCR 页图：${asset.storage_path}`);
+        throw error ?? new Error(`无法下载 OCR 页图: ${asset.storage_path}`);
       }
 
       const buffer = Buffer.from(await fileBlob.arrayBuffer());

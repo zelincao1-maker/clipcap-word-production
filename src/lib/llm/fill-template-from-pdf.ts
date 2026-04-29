@@ -1552,7 +1552,7 @@ async function extractAllSlotsWithTextModel(input: {
         `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}) after ${formatElapsedMs(requestElapsedMs)}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}${formatProcessBudgetSuffix({
           processStartedAtMs: input.processStartedAtMs,
           processHardTimeoutMs: input.processHardTimeoutMs,
-        })}).`;
+        })}, reason: ${getErrorMessage(normalizedError)}).`;
       console.error(requestFailedMessage, normalizedError);
       await input.onTrace?.({ message: requestFailedMessage });
       const shouldRetry =
@@ -1926,7 +1926,8 @@ export async function fillTemplateSlotsFromPdf(params: {
     } catch (error) {
       const textFillElapsedMs = Date.now() - textFillStartedAt;
       const textFillFailedMessage =
-        `[PDF Fill] Text slot fill failed for ${params.pdfFileName} after ${formatElapsedMs(textFillElapsedMs)}.`;
+        `[PDF Fill] Text slot fill failed for ${params.pdfFileName} after ${formatElapsedMs(textFillElapsedMs)}: ` +
+        `${getErrorMessage(error)}`;
       console.error(textFillFailedMessage, error);
       await params.onTrace?.({ message: textFillFailedMessage });
       await params.onTrace?.({
@@ -1968,7 +1969,8 @@ export async function fillTemplateSlotsFromPdf(params: {
   } catch (error) {
     const textFillElapsedMs = Date.now() - textFillStartedAt;
     const textFillFailedMessage =
-      `[PDF Fill] Text slot fill failed for ${params.pdfFileName} after ${formatElapsedMs(textFillElapsedMs)}.`;
+      `[PDF Fill] Text slot fill failed for ${params.pdfFileName} after ${formatElapsedMs(textFillElapsedMs)}: ` +
+      `${getErrorMessage(error)}`;
     console.error(textFillFailedMessage, error);
     await params.onTrace?.({ message: textFillFailedMessage });
     await params.onTrace?.({

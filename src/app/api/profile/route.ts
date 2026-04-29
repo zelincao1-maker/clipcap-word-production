@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
 import {
   getCurrentProfile,
   updateProfileRegistration,
@@ -41,7 +42,7 @@ export async function GET() {
     return NextResponse.json(
       {
         code: 'PROFILE_FETCH_FAILED',
-        message: error instanceof Error ? error.message : '读取资料失败，请稍后重试。',
+        message: getRawErrorMessage(error),
       },
       { status: 500 },
     );
@@ -92,7 +93,7 @@ export async function PATCH(request: Request) {
     return NextResponse.json(
       {
         code: 'PROFILE_REGISTRATION_FAILED',
-        message: error instanceof Error ? error.message : '资料保存失败，请稍后重试。',
+        message: getRawErrorMessage(error),
       },
       { status: 400 },
     );

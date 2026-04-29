@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
 import { logEvent } from '@/src/lib/logging/log-event';
 import {
   countExtractableParagraphsFromRawText,
@@ -97,7 +98,7 @@ export async function POST(request: Request) {
       .single();
 
     if (error || !task) {
-      throw error ?? new Error('创建槽位抽取任务失败。');
+      throw error ?? new Error('Failed to create template extraction task.');
     }
 
     await logEvent({
@@ -119,19 +120,21 @@ export async function POST(request: Request) {
       data: task,
     });
   } catch (error) {
+    const rawMessage = getRawErrorMessage(error);
+
     await logEvent({
       ownerId: user.id,
       actorEmail: user.email ?? null,
       level: 'error',
       eventType: 'template_extraction_task_create_failed',
-      message: error instanceof Error ? error.message : 'Failed to create template extraction task.',
+      message: rawMessage,
       route: '/api/template-extraction-tasks',
     });
 
     return NextResponse.json(
       {
         code: 'TEMPLATE_EXTRACTION_TASK_CREATE_FAILED',
-        message: error instanceof Error ? error.message : '创建槽位抽取任务失败，请稍后重试。',
+        message: rawMessage,
       },
       { status: 500 },
     );

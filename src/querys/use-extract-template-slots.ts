@@ -38,7 +38,7 @@ export function useExtractTemplateSlots() {
       };
 
       if (!response.ok || !payload.data) {
-        throw new Error(payload.message ?? '槽位识别失败，请稍后重试。');
+        throw new Error(payload.message ?? (response.statusText || 'Unknown error'));
       }
 
       return payload.data;

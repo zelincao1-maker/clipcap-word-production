@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { templateSlotExtractionResultSchema } from '@/src/app/api/types/template-slot-extraction';
+import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
 export const runtime = 'nodejs';
@@ -46,7 +47,7 @@ export async function GET(
       return NextResponse.json(
         {
           code: 'TEMPLATE_EXTRACTION_TASK_NOT_FOUND',
-          message: '未找到该槽位抽取任务。',
+          message: 'Template extraction task not found.',
         },
         { status: 404 },
       );
@@ -68,7 +69,7 @@ export async function GET(
     return NextResponse.json(
       {
         code: 'TEMPLATE_EXTRACTION_TASK_READ_FAILED',
-        message: error instanceof Error ? error.message : '读取槽位抽取任务失败，请稍后重试。',
+        message: getRawErrorMessage(error),
       },
       { status: 500 },
     );

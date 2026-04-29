@@ -1,5 +1,6 @@
 import 'server-only';
 
+import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 
 export type AppLogLevel = 'info' | 'warning' | 'error';
@@ -105,7 +106,7 @@ export async function logEvent(input: LogEventInput): Promise<LogEventResult> {
 
     return {
       ok: false,
-      error: error instanceof Error ? error : new Error('Unknown logEvent failure'),
+      error: error instanceof Error ? error : new Error(getRawErrorMessage(error)),
     };
   }
 }

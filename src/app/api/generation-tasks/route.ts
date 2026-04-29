@@ -1,5 +1,6 @@
 ﻿import { NextResponse } from 'next/server';
 import type { ExtractionParagraph } from '@/src/app/api/types/template-slot-extraction';
+import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
 import { getUserTemplateById } from '@/src/lib/data/templates-repository';
 import type {
   GenerationSlotSchemaItem,
@@ -75,27 +76,7 @@ function createUnauthorizedResponse() {
 }
 
 function getErrorMessage(error: unknown) {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  if (error && typeof error === 'object') {
-    if ('message' in error && typeof error.message === 'string') {
-      return error.message;
-    }
-
-    if ('error_description' in error && typeof error.error_description === 'string') {
-      return error.error_description;
-    }
-
-    try {
-      return JSON.stringify(error);
-    } catch {
-      return '创建批量生成任务失败，请稍后重试。';
-    }
-  }
-
-  return '创建批量生成任务失败，请稍后重试。';
+  return getRawErrorMessage(error);
 }
 
 function sanitizeFileName(fileName: string) {
