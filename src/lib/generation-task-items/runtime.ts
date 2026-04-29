@@ -1,0 +1,267 @@
+import { NextResponse } from 'next/server';
+import type {
+  GenerationSlotSchemaItem,
+  PdfPageInput,
+  PdfVisionPageInput,
+} from '@/src/lib/llm/fill-template-from-pdf';
+import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
+
+export type AdminClient = ReturnType<typeof createSupabaseAdminClient>;
+
+export type OcrImageAsset = {
+  uploaded_page_number: number;
+  original_page_number: number;
+  storage_path: string;
+};
+
+export type GenerationTaskItemRecord = {
+  id: string;
+  task_id: string;
+  owner_id: string;
+  template_id: string | null;
+  source_pdf_name: string;
+  source_pdf_path: string;
+  status: string;
+  elapsed_seconds: number;
+  slot_total_count: number;
+  slot_completed_count: number;
+  processing_trace?: string;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  reviewed_at?: string | null;
+  output_docx_path?: string | null;
+  error_message?: string | null;
+  llm_input?: {
+    template_name?: string;
+    template_prompt?: string;
+    slot_schema?: GenerationSlotSchemaItem[];
+    pages?: PdfPageInput[];
+    vision_pages?: PdfVisionPageInput[];
+    ocr_image_assets?: OcrImageAsset[];
+    likely_scanned?: boolean;
+    total_text_length?: number;
+    force_ocr?: boolean;
+    selected_original_page_numbers?: number[];
+  } | null;
+};
+
+export const generationTaskItemSelect =
+  'id, task_id, owner_id, template_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, reviewed_at, output_docx_path, error_message, llm_input';
+
+export function createUnauthorizedResponse() {
+  return NextResponse.json(
+    {
+      code: 'UNAUTHORIZED',
+      message: '请先登录后再继续。',
+    },
+    { status: 401 },
+  );
+}
+
+export function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : '处理任务时发生未知错误。';
+}
+
+export function buildFallbackReviewPayload(slotSchema: GenerationSlotSchemaItem[]) {
+  return {
+    document_summary: '',
+    extracted_items: slotSchema.map((slot) => ({
+      slot_key: slot.slot_key,
+      field_category: slot.field_category,
+      meaning_to_applicant: slot.meaning_to_applicant,
+      original_value: '',
+      evidence: '',
+      evidence_page_numbers: [],
+      notes: '',
+      confidence: null,
+    })),
+  };
+}
+
+export function formatProcessingTraceEntry(message: string) {
+  return `[${new Date().toISOString()}] ${message}`;
+}
+
+export function normalizePages(value: unknown): PdfPageInput[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(
+    (page): page is PdfPageInput =>
+      !!page &&
+      typeof page === 'object' &&
+      typeof (page as PdfPageInput).page_number === 'number' &&
+      typeof (page as PdfPageInput).text === 'string',
+  );
+}
+
+export function normalizeVisionPages(value: unknown): PdfVisionPageInput[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(
+    (page): page is PdfVisionPageInput =>
+      !!page &&
+      typeof page === 'object' &&
+      typeof (page as PdfVisionPageInput).page_number === 'number' &&
+      typeof (page as PdfVisionPageInput).image_data_url === 'string',
+  );
+}
+
+export function normalizeSelectedOriginalPageNumbers(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(
+    (pageNumber): pageNumber is number =>
+      typeof pageNumber === 'number' && Number.isInteger(pageNumber) && pageNumber > 0,
+  );
+}
+
+export function normalizeOcrImageAssets(value: unknown): OcrImageAsset[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter(
+      (entry): entry is OcrImageAsset =>
+        !!entry &&
+        typeof entry === 'object' &&
+        typeof entry.uploaded_page_number === 'number' &&
+        Number.isInteger(entry.uploaded_page_number) &&
+        entry.uploaded_page_number > 0 &&
+        typeof entry.original_page_number === 'number' &&
+        Number.isInteger(entry.original_page_number) &&
+        entry.original_page_number > 0 &&
+        typeof entry.storage_path === 'string' &&
+        entry.storage_path.trim().length > 0,
+    )
+    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
+}
+
+function getMimeTypeFromStoragePath(storagePath: string) {
+  const normalized = storagePath.toLowerCase();
+
+  if (normalized.endsWith('.png')) {
+    return 'image/png';
+  }
+
+  if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
+    return 'image/jpeg';
+  }
+
+  if (normalized.endsWith('.webp')) {
+    return 'image/webp';
+  }
+
+  return 'application/octet-stream';
+}
+
+export async function loadVisionPagesFromStoredAssets(params: {
+  admin: AdminClient;
+  ocrImageAssets: OcrImageAsset[];
+}) {
+  if (params.ocrImageAssets.length === 0) {
+    return [];
+  }
+
+  return Promise.all(
+    params.ocrImageAssets.map(async (asset) => {
+      const { data: fileBlob, error } = await params.admin.storage
+        .from('generation-pdfs')
+        .download(asset.storage_path);
+
+      if (error || !fileBlob) {
+        throw error ?? new Error(`无法下载 OCR 页图：${asset.storage_path}`);
+      }
+
+      const buffer = Buffer.from(await fileBlob.arrayBuffer());
+      const mimeType = fileBlob.type || getMimeTypeFromStoragePath(asset.storage_path);
+
+      return {
+        page_number: asset.uploaded_page_number,
+        image_data_url: `data:${mimeType};base64,${buffer.toString('base64')}`,
+        original_page_number: asset.original_page_number,
+      } satisfies PdfVisionPageInput;
+    }),
+  );
+}
+
+export async function recalculateTaskSummary(admin: AdminClient, taskId: string) {
+  const { data: items, error } = await admin
+    .from('generation_task_items')
+    .select('status')
+    .eq('task_id', taskId);
+
+  if (error) {
+    throw error;
+  }
+
+  const totalItems = items?.length ?? 0;
+  const succeededItems =
+    items?.filter((item) => ['succeeded', 'review_pending', 'reviewed'].includes(item.status))
+      .length ?? 0;
+  const failedItems = items?.filter((item) => item.status === 'failed').length ?? 0;
+  const hasRunningItems =
+    items?.some((item) =>
+      ['running', 'uploaded', 'pending', 'ocr_running', 'ocr_completed', 'slot_filling'].includes(
+        item.status,
+      ),
+    ) ?? false;
+
+  const nextStatus = hasRunningItems
+    ? 'running'
+    : failedItems > 0 && succeededItems === 0
+      ? 'failed'
+      : 'completed';
+
+  await admin
+    .from('generation_tasks')
+    .update({
+      status: nextStatus,
+      total_items: totalItems,
+      succeeded_items: succeededItems,
+      failed_items: failedItems,
+      finished_at: hasRunningItems ? null : new Date().toISOString(),
+    })
+    .eq('id', taskId);
+}
+
+export async function updateSlotProgress(
+  admin: AdminClient,
+  taskItemId: string,
+  progress: { completedSlots: number; totalSlots: number },
+) {
+  await admin
+    .from('generation_task_items')
+    .update({
+      slot_total_count: progress.totalSlots,
+      slot_completed_count: progress.completedSlots,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', taskItemId);
+}
+
+export async function appendProcessingTrace(
+  admin: AdminClient,
+  taskItemId: string,
+  message: string,
+) {
+  try {
+    const { error } = await admin.rpc('append_generation_task_item_processing_trace', {
+      p_task_item_id: taskItemId,
+      p_entry: formatProcessingTraceEntry(message),
+    });
+
+    if (error) {
+      console.error('[Generation Task] Failed to append processing trace.', error);
+    }
+  } catch (error) {
+    console.error('[Generation Task] Failed to append processing trace.', error);
+  }
+}

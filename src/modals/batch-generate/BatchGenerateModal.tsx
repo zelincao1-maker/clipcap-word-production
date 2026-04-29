@@ -24,6 +24,7 @@ import { parsePdf, renderPdfPagesForVision } from '@/src/lib/pdf/client-pdf';
 import {
   useGenerationTask,
   useProcessGenerationTaskItem,
+  useStartGenerationTaskItemSlotFill,
 } from '@/src/querys/use-generation-task-runtime';
 import { useCreateGenerationTask } from '@/src/querys/use-generation-tasks';
 
@@ -55,6 +56,7 @@ declare global {
     clipcapOcrTextPages?: Array<{
       fileName: string;
       uploadedPageNumber: number;
+      originalPageNumber?: number;
       text: string;
     }>;
     clipcapSlotFillInputs?: Array<{
@@ -205,7 +207,11 @@ function getStatusColor(status: string) {
   switch (status) {
     case 'uploaded':
       return 'blue';
+    case 'ocr_completed':
+      return 'blue';
     case 'running':
+    case 'ocr_running':
+    case 'slot_filling':
       return 'orange';
     case 'review_pending':
       return 'teal';
@@ -226,6 +232,12 @@ function getStatusLabel(status: string) {
       return '已上传';
     case 'running':
       return '识别中';
+    case 'ocr_running':
+      return 'OCR 识别中';
+    case 'ocr_completed':
+      return 'OCR 完成';
+    case 'slot_filling':
+      return '槽位回填中';
     case 'review_pending':
       return '待核查';
     case 'reviewed':
@@ -238,7 +250,12 @@ function getStatusLabel(status: string) {
 }
 
 function formatElapsedSeconds(item: GenerationTaskItemSummary, now: number, startedAt: number | null) {
-  if (['uploaded', 'running', 'pending'].includes(item.status) && startedAt) {
+  if (
+    ['uploaded', 'running', 'pending', 'ocr_running', 'ocr_completed', 'slot_filling'].includes(
+      item.status,
+    ) &&
+    startedAt
+  ) {
     return Math.max(item.elapsed_seconds, Math.floor((now - startedAt) / 1000));
   }
 
@@ -261,8 +278,10 @@ export function BatchGenerateModal({
   const [isPreparingFiles, setIsPreparingFiles] = useState(false);
   const createGenerationTaskMutation = useCreateGenerationTask();
   const processGenerationTaskItemMutation = useProcessGenerationTaskItem();
+  const startGenerationTaskItemSlotFillMutation = useStartGenerationTaskItemSlotFill();
   const taskQuery = useGenerationTask(taskId);
-  const launchedItemIdsRef = useRef<Set<string>>(new Set());
+  const launchedOcrItemIdsRef = useRef<Set<string>>(new Set());
+  const launchedSlotFillItemIdsRef = useRef<Set<string>>(new Set());
   const itemStartedAtRef = useRef<Map<string, number>>(new Map());
   const itemTraceRef = useRef<Map<string, string>>(new Map());
   const refreshTaskLists = async () => {
@@ -319,7 +338,9 @@ export function BatchGenerateModal({
 
   const taskItems = taskQuery.data?.items ?? [];
   const hasRunningItems = taskItems.some((item) =>
-    ['uploaded', 'running', 'pending'].includes(item.status),
+    ['uploaded', 'running', 'pending', 'ocr_running', 'ocr_completed', 'slot_filling'].includes(
+      item.status,
+    ),
   );
   const succeededCount = taskItems.filter((item) =>
     ['review_pending', 'reviewed'].includes(item.status),
@@ -387,11 +408,11 @@ export function BatchGenerateModal({
         return;
       }
 
-      if (launchedItemIdsRef.current.has(item.id)) {
+      if (launchedOcrItemIdsRef.current.has(item.id)) {
         return;
       }
 
-      launchedItemIdsRef.current.add(item.id);
+      launchedOcrItemIdsRef.current.add(item.id);
       itemStartedAtRef.current.set(item.id, Date.now());
 
       void processGenerationTaskItemMutation
@@ -413,6 +434,42 @@ export function BatchGenerateModal({
         });
     });
   }, [processGenerationTaskItemMutation, queryClient, taskId, taskQuery.data]);
+
+  useEffect(() => {
+    if (!taskId || !taskQuery.data) {
+      return;
+    }
+
+    taskQuery.data.items.forEach((item) => {
+      if (item.status !== 'ocr_completed') {
+        return;
+      }
+
+      if (launchedSlotFillItemIdsRef.current.has(item.id)) {
+        return;
+      }
+
+      launchedSlotFillItemIdsRef.current.add(item.id);
+
+      void startGenerationTaskItemSlotFillMutation
+        .mutateAsync(item.id)
+        .then(() => {
+          void refreshTaskLists();
+        })
+        .catch((error) => {
+          notifications.show({
+            color: 'red',
+            title: '槽位回填失败',
+            message:
+              error instanceof Error
+                ? `${item.source_pdf_name}：${error.message}`
+                : `${item.source_pdf_name} 槽位回填启动失败，请稍后重试。`,
+          });
+
+          void refreshTaskLists();
+        });
+    });
+  }, [startGenerationTaskItemSlotFillMutation, taskId, taskQuery.data]);
 
   useEffect(() => {
     if (!taskQuery.data) {
@@ -446,7 +503,10 @@ export function BatchGenerateModal({
 
         if (ocrPageDataMatch) {
           const uploadedPageNumber = Number(ocrPageDataMatch[1]);
-          const payload = JSON.parse(ocrPageDataMatch[2] ?? '{}') as { text?: string };
+          const payload = JSON.parse(ocrPageDataMatch[2] ?? '{}') as {
+            original_page_number?: number;
+            text?: string;
+          };
           const decodedText = payload.text ?? '';
           const currentEntries = window.clipcapOcrTextPages ?? [];
           const nextEntries = currentEntries.filter(
@@ -460,6 +520,7 @@ export function BatchGenerateModal({
           nextEntries.push({
             fileName: item.source_pdf_name,
             uploadedPageNumber,
+            originalPageNumber: payload.original_page_number,
             text: decodedText,
           });
 
@@ -1002,7 +1063,7 @@ export function BatchGenerateModal({
                       </Text>
                     ) : null}
 
-                    {['uploaded', 'running', 'pending'].includes(item.status) && item.slot_total_count > 0 ? (
+                    {['uploaded', 'running', 'pending', 'ocr_running', 'ocr_completed', 'slot_filling'].includes(item.status) && item.slot_total_count > 0 ? (
                       <Text c="dimmed" size="sm">
                         已完成 {item.slot_completed_count} 个槽位，待抽取 {getPendingSlotCount(item)} 个槽位
                       </Text>

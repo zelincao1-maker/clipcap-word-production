@@ -22,6 +22,7 @@ export interface PdfPageInput {
 export interface PdfVisionPageInput {
   page_number: number;
   image_data_url: string;
+  original_page_number?: number;
 }
 
 interface ModelMatch {
@@ -878,6 +879,9 @@ async function extractTextFromVisionPages(input: {
           text?: string;
         }>;
       }>(rawContent);
+      const originalPageNumberByUploadedPageNumber = new Map(
+        input.visionPages.map((page) => [page.page_number, page.original_page_number ?? page.page_number]),
+      );
 
       const ocrPages = (normalized.pages ?? [])
         .filter(
@@ -887,6 +891,8 @@ async function extractTextFromVisionPages(input: {
         .map((page) => ({
           page_number: page.page_number,
           text: page.text.trim(),
+          original_page_number:
+            originalPageNumberByUploadedPageNumber.get(page.page_number) ?? page.page_number,
         }));
 
       const batchElapsedMs = Date.now() - batchStartedAt;
@@ -898,11 +904,12 @@ async function extractTextFromVisionPages(input: {
         })}).`;
       console.info(batchCompletedMessage);
       await input.onTrace?.({ message: batchCompletedMessage });
-      for (const page of ocrPages) {
-        const pageTraceDataMessage =
-          `[PDF Fill][OCR][PageData ${page.page_number}] ${stringifyTraceJson({
-            text: page.text,
-          })}`;
+        for (const page of ocrPages) {
+          const pageTraceDataMessage =
+            `[PDF Fill][OCR][PageData ${page.page_number}] ${stringifyTraceJson({
+              original_page_number: page.original_page_number ?? page.page_number,
+              text: page.text,
+            })}`;
         console.info(pageTraceDataMessage);
         await input.onTrace?.({ message: pageTraceDataMessage });
       }
@@ -1395,7 +1402,7 @@ async function extractAllSlotsWithTextModel(input: {
   throw new Error('Text slot extraction failed after multiple attempts.');
 }
 
-async function fillSlotsFromTextPages(params: {
+export async function fillSlotsFromTextPages(params: {
   pdfFileName: string;
   slots: GenerationSlotSchemaItem[];
   pages: PdfPageInput[];
@@ -1451,6 +1458,114 @@ async function fillSlotsFromTextPages(params: {
   });
 
   return fullDocumentResult;
+}
+
+export async function extractPdfTextFromVisionPages(params: {
+  pdfFileName: string;
+  slots: GenerationSlotSchemaItem[];
+  visionPages: PdfVisionPageInput[];
+  processStartedAtMs?: number;
+  processHardTimeoutMs?: number;
+  onTrace?: (trace: { message: string }) => Promise<void> | void;
+  onProgress?: (progress: { completedSlots: number; totalSlots: number }) => Promise<void> | void;
+}) {
+  const visionPageBatches = buildVisionPageBatches(params.visionPages);
+  await params.onProgress?.({
+    completedSlots: 0,
+    totalSlots: params.slots.length,
+  });
+
+  const ocrStartedAt = Date.now();
+  const ocrStartedMessage =
+    `[PDF Fill] OCR started for ${params.pdfFileName} ` +
+    `(vision pages: ${params.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}).`;
+  console.info(ocrStartedMessage);
+  await params.onTrace?.({ message: ocrStartedMessage });
+  let ocrBatchResults: PdfPageInput[][];
+
+  try {
+    const settledOcrBatchResults = await runWithConcurrencySettled({
+      items: visionPageBatches,
+      concurrency: MAX_VISION_OCR_BATCH_CONCURRENCY,
+      worker: async (visionPageBatch, batchIndex) =>
+        extractTextFromVisionPages({
+          documentName: params.pdfFileName,
+          visionPages: visionPageBatch,
+          totalVisionPages: params.visionPages.length,
+          batchIndex,
+          totalBatches: visionPageBatches.length,
+          processStartedAtMs: params.processStartedAtMs,
+          processHardTimeoutMs: params.processHardTimeoutMs ?? PROCESS_HARD_TIMEOUT_MS,
+          processReserveMs: PROCESS_OCR_SLOT_FILL_RESERVE_MS,
+          onTrace: params.onTrace,
+        }),
+    });
+    const successfulOcrBatchResults: PdfPageInput[][] = [];
+    const failedOcrBatchResults: Array<{ index: number; error: unknown }> = [];
+
+    for (const batchResult of settledOcrBatchResults) {
+      if (batchResult.ok) {
+        successfulOcrBatchResults.push(batchResult.value);
+        continue;
+      }
+
+      failedOcrBatchResults.push({
+        index: batchResult.index,
+        error: batchResult.error,
+      });
+    }
+
+    if (failedOcrBatchResults.length > 0) {
+      for (const failedOcrBatchResult of failedOcrBatchResults) {
+        const failedBatchMessage =
+          `[PDF Fill][OCR] Continuing after failed batch ${failedOcrBatchResult.index + 1}/${visionPageBatches.length} ` +
+          `for ${params.pdfFileName}: ${getErrorMessage(failedOcrBatchResult.error)}`;
+        console.error(failedBatchMessage, failedOcrBatchResult.error);
+        await params.onTrace?.({ message: failedBatchMessage });
+      }
+
+      const partialSummaryMessage =
+        `[PDF Fill][OCR] Partial success for ${params.pdfFileName}: ` +
+        `${successfulOcrBatchResults.length}/${visionPageBatches.length} OCR batches succeeded, ` +
+        `${failedOcrBatchResults.length} failed. Continuing with successful OCR pages only.`;
+      console.info(partialSummaryMessage);
+      await params.onTrace?.({ message: partialSummaryMessage });
+    }
+
+    if (successfulOcrBatchResults.length === 0) {
+      throw new Error('All OCR batches failed; no OCR text could be extracted.');
+    }
+
+    ocrBatchResults = successfulOcrBatchResults;
+    const ocrElapsedMs = Date.now() - ocrStartedAt;
+    const ocrCompletedMessage =
+      `[PDF Fill] OCR completed for ${params.pdfFileName} in ${formatElapsedMs(ocrElapsedMs)} ` +
+      `(vision pages: ${params.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}).`;
+    console.info(ocrCompletedMessage);
+    await params.onTrace?.({ message: ocrCompletedMessage });
+  } catch (error) {
+    const ocrElapsedMs = Date.now() - ocrStartedAt;
+    const ocrFailedMessage =
+      `[PDF Fill] OCR failed for ${params.pdfFileName} after ${formatElapsedMs(ocrElapsedMs)}.`;
+    console.error(ocrFailedMessage, error);
+    await params.onTrace?.({ message: ocrFailedMessage });
+    throw error;
+  }
+
+  const ocrPages = ocrBatchResults
+    .flat()
+    .filter((page) => page.text.trim().length > 0)
+    .sort((left, right) => left.page_number - right.page_number);
+
+  const mergedOcrMessage = `[PDF Fill][OCR] Merged OCR pages for ${params.pdfFileName}: ${ocrPages.length} pages with usable text.`;
+  console.info(mergedOcrMessage);
+  await params.onTrace?.({ message: mergedOcrMessage });
+
+  if (ocrPages.length === 0) {
+    throw new Error('Vision OCR returned no usable text for the selected PDF pages.');
+  }
+
+  return ocrPages;
 }
 
 async function runWithConcurrency<TInput, TOutput>(params: {
@@ -1571,101 +1686,15 @@ export async function fillTemplateSlotsFromPdf(params: {
         params.totalTextLength <= Math.max(20, validPages.length * 10)));
 
   if (shouldUseVision) {
-    const visionPageBatches = buildVisionPageBatches(validVisionPages);
-    await params.onProgress?.({
-      completedSlots: 0,
-      totalSlots: params.slots.length,
+    const ocrPages = await extractPdfTextFromVisionPages({
+      pdfFileName: params.pdfFileName,
+      slots: params.slots,
+      visionPages: validVisionPages,
+      processStartedAtMs: params.processStartedAtMs,
+      processHardTimeoutMs: params.processHardTimeoutMs,
+      onTrace: params.onTrace,
+      onProgress: params.onProgress,
     });
-
-    const ocrStartedAt = Date.now();
-    const ocrStartedMessage =
-      `[PDF Fill] OCR started for ${params.pdfFileName} ` +
-      `(vision pages: ${validVisionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}).`;
-    console.info(ocrStartedMessage);
-    await params.onTrace?.({ message: ocrStartedMessage });
-    let ocrBatchResults: PdfPageInput[][];
-
-    try {
-      const settledOcrBatchResults = await runWithConcurrencySettled({
-        items: visionPageBatches,
-        concurrency: MAX_VISION_OCR_BATCH_CONCURRENCY,
-        worker: async (visionPageBatch, batchIndex) =>
-          extractTextFromVisionPages({
-            documentName: params.pdfFileName,
-            visionPages: visionPageBatch,
-            totalVisionPages: validVisionPages.length,
-            batchIndex,
-            totalBatches: visionPageBatches.length,
-            processStartedAtMs: params.processStartedAtMs,
-            processHardTimeoutMs: params.processHardTimeoutMs ?? PROCESS_HARD_TIMEOUT_MS,
-            processReserveMs: PROCESS_OCR_SLOT_FILL_RESERVE_MS,
-            onTrace: params.onTrace,
-          }),
-      });
-      const successfulOcrBatchResults: PdfPageInput[][] = [];
-      const failedOcrBatchResults: Array<{ index: number; error: unknown }> = [];
-
-      for (const batchResult of settledOcrBatchResults) {
-        if (batchResult.ok) {
-          successfulOcrBatchResults.push(batchResult.value);
-          continue;
-        }
-
-        failedOcrBatchResults.push({
-          index: batchResult.index,
-          error: batchResult.error,
-        });
-      }
-
-      if (failedOcrBatchResults.length > 0) {
-        for (const failedOcrBatchResult of failedOcrBatchResults) {
-          const failedBatchMessage =
-            `[PDF Fill][OCR] Continuing after failed batch ${failedOcrBatchResult.index + 1}/${visionPageBatches.length} ` +
-            `for ${params.pdfFileName}: ${getErrorMessage(failedOcrBatchResult.error)}`;
-          console.error(failedBatchMessage, failedOcrBatchResult.error);
-          await params.onTrace?.({ message: failedBatchMessage });
-        }
-
-        const partialSummaryMessage =
-          `[PDF Fill][OCR] Partial success for ${params.pdfFileName}: ` +
-          `${successfulOcrBatchResults.length}/${visionPageBatches.length} OCR batches succeeded, ` +
-          `${failedOcrBatchResults.length} failed. Continuing with successful OCR pages only.`;
-        console.info(partialSummaryMessage);
-        await params.onTrace?.({ message: partialSummaryMessage });
-      }
-
-      if (successfulOcrBatchResults.length === 0) {
-        throw new Error('All OCR batches failed; no OCR text could be extracted.');
-      }
-
-      ocrBatchResults = successfulOcrBatchResults;
-      const ocrElapsedMs = Date.now() - ocrStartedAt;
-      const ocrCompletedMessage =
-        `[PDF Fill] OCR completed for ${params.pdfFileName} in ${formatElapsedMs(ocrElapsedMs)} ` +
-        `(vision pages: ${validVisionPages.length}, batches: ${visionPageBatches.length}).`;
-      console.info(ocrCompletedMessage);
-      await params.onTrace?.({ message: ocrCompletedMessage });
-    } catch (error) {
-      const ocrElapsedMs = Date.now() - ocrStartedAt;
-      const ocrFailedMessage =
-        `[PDF Fill] OCR failed for ${params.pdfFileName} after ${formatElapsedMs(ocrElapsedMs)}.`;
-      console.error(ocrFailedMessage, error);
-      await params.onTrace?.({ message: ocrFailedMessage });
-      throw error;
-    }
-
-    const ocrPages = ocrBatchResults
-      .flat()
-      .filter((page) => page.text.trim().length > 0)
-      .sort((left, right) => left.page_number - right.page_number);
-
-    const mergedOcrMessage = `[PDF Fill][OCR] Merged OCR pages for ${params.pdfFileName}: ${ocrPages.length} pages with usable text.`;
-    console.info(mergedOcrMessage);
-    await params.onTrace?.({ message: mergedOcrMessage });
-
-    if (ocrPages.length === 0) {
-      throw new Error('Vision OCR returned no usable text for the selected PDF pages.');
-    }
 
     const textFillStartedAt = Date.now();
     const textFillStartedMessage =

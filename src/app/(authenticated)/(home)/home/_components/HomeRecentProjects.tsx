@@ -65,8 +65,11 @@ function getTaskStatusColor(status: string) {
     case 'failed':
       return 'red';
     case 'running':
+    case 'ocr_running':
+    case 'slot_filling':
       return 'orange';
     case 'uploaded':
+    case 'ocr_completed':
       return 'blue';
     default:
       return 'gray';
@@ -83,6 +86,12 @@ function getTaskStatusLabel(status: string) {
       return '处理失败';
     case 'running':
       return '识别中';
+    case 'ocr_running':
+      return 'OCR 识别中';
+    case 'ocr_completed':
+      return 'OCR 完成';
+    case 'slot_filling':
+      return '槽位回填中';
     case 'uploaded':
       return '已上传';
     default:

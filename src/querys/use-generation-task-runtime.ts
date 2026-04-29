@@ -75,6 +75,15 @@ async function parseApiPayload<T>(
   return { payload: null, message: rawText };
 }
 
+const runningItemStatuses = [
+  'uploaded',
+  'running',
+  'pending',
+  'ocr_running',
+  'ocr_completed',
+  'slot_filling',
+];
+
 export function useGenerationTask(taskId: string | null) {
   return useQuery({
     queryKey: ['generation-task', taskId],
@@ -82,7 +91,7 @@ export function useGenerationTask(taskId: string | null) {
     refetchInterval: (query) => {
       const payload = query.state.data as GenerationTaskDetailResponse | undefined;
       const hasRunningItems = payload?.items.some((item) =>
-        ['uploaded', 'running', 'pending'].includes(item.status),
+        runningItemStatuses.includes(item.status),
       );
 
       return hasRunningItems ? 1000 : false;
@@ -126,13 +135,13 @@ export function useTemplateGenerationTasks(enabled = true) {
 export function useProcessGenerationTaskItem() {
   return useMutation({
     mutationFn: async (taskItemId: string) => {
-      console.log('[Generation Task Item] Process request', {
+      console.log('[Generation Task Item] OCR request', {
         taskItemId,
-        route: `/api/generation-task-items/${taskItemId}/process`,
+        route: `/api/generation-task-items/${taskItemId}/ocr`,
         method: 'POST',
       });
 
-      const response = await fetch(`/api/generation-task-items/${taskItemId}/process`, {
+      const response = await fetch(`/api/generation-task-items/${taskItemId}/ocr`, {
         method: 'POST',
       });
       const { payload, message } = await parseApiPayload<{
@@ -143,8 +152,8 @@ export function useProcessGenerationTaskItem() {
       }>(response);
 
       if (!response.ok || !payload?.data) {
-        const errorMessage = message ?? 'PDF 填充处理失败，请稍后重试。';
-        console.error('[Generation Task Item] Process failed', {
+        const errorMessage = message ?? 'OCR 处理失败，请稍后重试。';
+        console.error('[Generation Task Item] OCR failed', {
           status: response.status,
           statusText: response.statusText,
           taskItemId,
@@ -152,9 +161,9 @@ export function useProcessGenerationTaskItem() {
         });
 
         await reportClientError({
-          eventType: 'generation_task_item_process_failed_frontend',
+          eventType: 'generation_task_item_ocr_failed_frontend',
           message: errorMessage,
-          route: '/api/generation-task-items/[taskItemId]/process',
+          route: '/api/generation-task-items/[taskItemId]/ocr',
           taskItemId,
           payload: {
             status: response.status,
@@ -165,7 +174,61 @@ export function useProcessGenerationTaskItem() {
         throw new Error(errorMessage);
       }
 
-      console.log('[Generation Task Item] Process response', {
+      console.log('[Generation Task Item] OCR response', {
+        status: response.status,
+        statusText: response.statusText,
+        taskItemId,
+        data: payload.data,
+      });
+
+      return payload.data;
+    },
+  });
+}
+
+export function useStartGenerationTaskItemSlotFill() {
+  return useMutation({
+    mutationFn: async (taskItemId: string) => {
+      console.log('[Generation Task Item] Slot fill request', {
+        taskItemId,
+        route: `/api/generation-task-items/${taskItemId}/slot-fill`,
+        method: 'POST',
+      });
+
+      const response = await fetch(`/api/generation-task-items/${taskItemId}/slot-fill`, {
+        method: 'POST',
+      });
+      const { payload, message } = await parseApiPayload<{
+        message?: string;
+        data?: {
+          item: GenerationTaskItemSummary;
+        };
+      }>(response);
+
+      if (!response.ok || !payload?.data) {
+        const errorMessage = message ?? '槽位回填启动失败，请稍后重试。';
+        console.error('[Generation Task Item] Slot fill failed', {
+          status: response.status,
+          statusText: response.statusText,
+          taskItemId,
+          message: errorMessage,
+        });
+
+        await reportClientError({
+          eventType: 'generation_task_item_slot_fill_failed_frontend',
+          message: errorMessage,
+          route: '/api/generation-task-items/[taskItemId]/slot-fill',
+          taskItemId,
+          payload: {
+            status: response.status,
+            statusText: response.statusText,
+          },
+        });
+
+        throw new Error(errorMessage);
+      }
+
+      console.log('[Generation Task Item] Slot fill response', {
         status: response.status,
         statusText: response.statusText,
         taskItemId,
