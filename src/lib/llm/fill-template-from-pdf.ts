@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Agent } from 'undici';
+import { Agent, fetch as undiciFetch } from 'undici';
 import {
   getTextLlmApiKey,
   getTextLlmBaseUrl,
@@ -74,9 +74,7 @@ const MAX_TEXT_SLOTS_PER_REQUEST = 10;
 const PROCESS_HARD_TIMEOUT_MS = 300000;
 const PROCESS_OCR_SLOT_FILL_RESERVE_MS = 60000;
 const LLM_CONNECT_TIMEOUT_MS = 30000;
-type RequestInitWithDispatcher = RequestInit & {
-  dispatcher?: Agent;
-};
+type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 const llmFetchDispatcher = new Agent({
   connect: {
     timeout: LLM_CONNECT_TIMEOUT_MS,
@@ -613,7 +611,7 @@ async function extractSlotWithTextModel(input: {
     );
 
     try {
-      const upstream = await fetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
+      const upstream = await undiciFetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -661,14 +659,20 @@ async function extractSlotWithTextModel(input: {
             },
           ],
         }),
-      } as RequestInitWithDispatcher);
+      } as UndiciFetchInit);
 
       if (!upstream.ok) {
         const details = await upstream.text();
         throw new Error(`Text model request failed (${upstream.status}): ${details}`);
       }
 
-      const payload = await upstream.json();
+      const payload = (await upstream.json()) as {
+        choices?: Array<{
+          message?: {
+            content?: string;
+          };
+        }>;
+      };
       const rawContent = payload?.choices?.[0]?.message?.content;
 
       if (typeof rawContent !== 'string' || !rawContent.trim()) {
@@ -887,7 +891,7 @@ async function extractTextFromVisionPages(input: {
         });
       });
 
-      const upstream = await fetch(resolveChatCompletionsUrl(getVisionLlmBaseUrl()), {
+      const upstream = await undiciFetch(resolveChatCompletionsUrl(getVisionLlmBaseUrl()), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -909,14 +913,20 @@ async function extractTextFromVisionPages(input: {
             },
           ],
         }),
-      } as RequestInitWithDispatcher);
+      } as UndiciFetchInit);
 
       if (!upstream.ok) {
         const details = await upstream.text();
         throw new Error(`Vision model request failed (${upstream.status}): ${details}`);
       }
 
-      const payload = await upstream.json();
+      const payload = (await upstream.json()) as {
+        choices?: Array<{
+          message?: {
+            content?: string;
+          };
+        }>;
+      };
       const rawContent = payload?.choices?.[0]?.message?.content;
 
       if (typeof rawContent !== 'string' || !rawContent.trim()) {
@@ -1356,7 +1366,7 @@ async function extractAllSlotsWithTextModel(input: {
         void input.onTrace?.({ message: heartbeatMessage });
       }, 15000);
 
-      const upstream = await fetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
+      const upstream = await undiciFetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1405,14 +1415,20 @@ async function extractAllSlotsWithTextModel(input: {
             },
           ],
         }),
-      } as RequestInitWithDispatcher);
+      } as UndiciFetchInit);
 
       if (!upstream.ok) {
         const details = await upstream.text();
         throw new Error(`Text model request failed (${upstream.status}): ${details}`);
       }
 
-      const payload = await upstream.json();
+      const payload = (await upstream.json()) as {
+        choices?: Array<{
+          message?: {
+            content?: string;
+          };
+        }>;
+      };
       const rawContent = payload?.choices?.[0]?.message?.content;
 
       if (typeof rawContent !== 'string' || !rawContent.trim()) {
