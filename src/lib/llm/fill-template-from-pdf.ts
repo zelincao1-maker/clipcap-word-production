@@ -1195,19 +1195,44 @@ async function extractAllSlotsWithTextModel(input: {
   slots: GenerationSlotSchemaItem[];
   pageNumbers: number[];
   chunkText: string;
+  requestLabel?: string;
+  onTrace?: (trace: { message: string }) => Promise<void> | void;
+  processStartedAtMs?: number;
+  processHardTimeoutMs?: number;
 }) {
   for (let attempt = 1; attempt <= MAX_TEXT_REQUEST_RETRIES; attempt += 1) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(
-      () => controller.abort(),
-      getTextRequestTimeoutMs({
-        pageCount: input.pageNumbers.length,
-        charCount: input.chunkText.length,
-        attempt,
-      }),
-    );
+    const requestStartedAt = Date.now();
+    const requestTimeoutMs = getTextRequestTimeoutMs({
+      pageCount: input.pageNumbers.length,
+      charCount: input.chunkText.length,
+      attempt,
+    });
+    const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+    let heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
 
     try {
+      const requestLabel = input.requestLabel ?? 'full-text slot request';
+      const requestStartedMessage =
+        `[PDF Fill][Text] Starting ${requestLabel} for ${input.documentName} ` +
+        `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}, timeout: ${formatElapsedMs(requestTimeoutMs)}${formatProcessBudgetSuffix({
+          processStartedAtMs: input.processStartedAtMs,
+          processHardTimeoutMs: input.processHardTimeoutMs,
+        })}).`;
+      console.info(requestStartedMessage);
+      await input.onTrace?.({ message: requestStartedMessage });
+      heartbeatIntervalId = setInterval(() => {
+        const elapsedMs = Date.now() - requestStartedAt;
+        const heartbeatMessage =
+          `[PDF Fill][Text] Waiting on ${requestLabel} for ${input.documentName} ` +
+          `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}${formatProcessBudgetSuffix({
+            processStartedAtMs: input.processStartedAtMs,
+            processHardTimeoutMs: input.processHardTimeoutMs,
+          })}).`;
+        console.info(heartbeatMessage);
+        void input.onTrace?.({ message: heartbeatMessage });
+      }, 15000);
+
       const upstream = await fetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
         method: 'POST',
         headers: {
@@ -1277,7 +1302,7 @@ async function extractAllSlotsWithTextModel(input: {
         results?: ModelResultCandidate[];
       }>(rawContent);
 
-      return {
+      const result = {
         document_summary: '',
         extracted_items: input.slots.flatMap((slot) => {
           const firstResult = findResultForSlot(slot, normalized.results, {
@@ -1317,6 +1342,17 @@ async function extractAllSlotsWithTextModel(input: {
           ];
         }),
       };
+      const requestElapsedMs = Date.now() - requestStartedAt;
+      const requestCompletedMessage =
+        `[PDF Fill][Text] Completed ${requestLabel} for ${input.documentName} ` +
+        `(attempt ${attempt}) with ${result.extracted_items.filter((item) => hasFilledValue(item.original_value)).length}/${input.slots.length} filled slots in ${formatElapsedMs(requestElapsedMs)}${formatProcessBudgetSuffix({
+          processStartedAtMs: input.processStartedAtMs,
+          processHardTimeoutMs: input.processHardTimeoutMs,
+        })}).`;
+      console.info(requestCompletedMessage);
+      await input.onTrace?.({ message: requestCompletedMessage });
+
+      return result;
     } catch (error) {
       const normalizedError = wrapFetchFailure(error, {
         stage: 'text-slot-fill',
@@ -1325,6 +1361,16 @@ async function extractAllSlotsWithTextModel(input: {
         baseUrl: getTextLlmBaseUrl(),
         attempt,
       });
+      const requestLabel = input.requestLabel ?? 'full-text slot request';
+      const requestElapsedMs = Date.now() - requestStartedAt;
+      const requestFailedMessage =
+        `[PDF Fill][Text] Failed ${requestLabel} for ${input.documentName} ` +
+        `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}) after ${formatElapsedMs(requestElapsedMs)}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}${formatProcessBudgetSuffix({
+          processStartedAtMs: input.processStartedAtMs,
+          processHardTimeoutMs: input.processHardTimeoutMs,
+        })}).`;
+      console.error(requestFailedMessage, normalizedError);
+      await input.onTrace?.({ message: requestFailedMessage });
       const shouldRetry =
         attempt < MAX_TEXT_REQUEST_RETRIES && shouldRetryTextRequest(normalizedError);
 
@@ -1338,6 +1384,9 @@ async function extractAllSlotsWithTextModel(input: {
 
       await sleep(1500 * attempt);
     } finally {
+      if (heartbeatIntervalId) {
+        clearInterval(heartbeatIntervalId);
+      }
       clearTimeout(timeoutId);
     }
   }
@@ -1349,6 +1398,8 @@ async function fillSlotsFromTextPages(params: {
   pdfFileName: string;
   slots: GenerationSlotSchemaItem[];
   pages: PdfPageInput[];
+  processStartedAtMs?: number;
+  processHardTimeoutMs?: number;
   onProgress?: (progress: { completedSlots: number; totalSlots: number }) => Promise<void> | void;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
@@ -1392,6 +1443,10 @@ async function fillSlotsFromTextPages(params: {
         slots: params.slots,
         pageNumbers: allPageNumbers,
         chunkText: fullDocumentText,
+        requestLabel: 'full-text all-slot request',
+        onTrace: params.onTrace,
+        processStartedAtMs: params.processStartedAtMs,
+        processHardTimeoutMs: params.processHardTimeoutMs,
       });
       const completedSlots = fullDocumentResult.extracted_items.filter((item) =>
         hasFilledValue(item.original_value),
@@ -1452,6 +1507,10 @@ async function fillSlotsFromTextPages(params: {
         slots: slotBatch,
         pageNumbers: allPageNumbers,
         chunkText: fullDocumentText,
+        requestLabel: `slot batch ${index + 1}/${slotBatches.length}`,
+        onTrace: params.onTrace,
+        processStartedAtMs: params.processStartedAtMs,
+        processHardTimeoutMs: params.processHardTimeoutMs,
       });
 
       const batchCompletedMessage =
@@ -1737,6 +1796,8 @@ export async function fillTemplateSlotsFromPdf(params: {
         pdfFileName: params.pdfFileName,
         slots: params.slots,
         pages: ocrPages,
+        processStartedAtMs: params.processStartedAtMs,
+        processHardTimeoutMs: params.processHardTimeoutMs,
         onProgress: params.onProgress,
         onTrace: params.onTrace,
       });
@@ -1768,6 +1829,8 @@ export async function fillTemplateSlotsFromPdf(params: {
       pdfFileName: params.pdfFileName,
       slots: params.slots,
       pages: validPages,
+      processStartedAtMs: params.processStartedAtMs,
+      processHardTimeoutMs: params.processHardTimeoutMs,
       onProgress: params.onProgress,
       onTrace: params.onTrace,
     });
