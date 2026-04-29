@@ -1,54 +1,27 @@
-'use client';
+import type { Metadata } from 'next';
+import { AuthCompleteClient } from '@/src/app/auth/complete/AuthCompleteClient';
 
-import { Button, Card, Stack, Text, Title } from '@mantine/core';
-import { useEffect } from 'react';
-import { publishAuthSyncEvent } from '@/src/lib/auth/auth-sync';
+type AuthCompletePageProps = {
+  searchParams: Promise<{
+    next?: string;
+  }>;
+};
 
-export default function AuthCompletePage() {
-  useEffect(() => {
-    publishAuthSyncEvent();
-  }, []);
+export const metadata: Metadata = {
+  title: '登录完成',
+};
 
-  return (
-    <main
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '24px',
-      }}
-    >
-      <Card
-        padding="xl"
-        radius="xl"
-        withBorder
-        style={{ width: 'min(460px, 100%)' }}
-      >
-        <Stack gap="md">
-          <Stack gap="xs">
-            <Text c="teal.4" fw={800} size="lg">
-              ClipCap
-            </Text>
-            <Title order={2}>登录已完成</Title>
-            <Text c="dimmed" size="sm">
-              如果你最开始的首页标签页还开着，它现在会自动同步登录状态。当前这个页面不用再进入一个新的
-              首页了，直接关闭即可。
-            </Text>
-          </Stack>
+function normalizeNextPath(next: string | undefined) {
+  if (!next || !next.startsWith('/')) {
+    return '/home';
+  }
 
-          <Button
-            fullWidth
-            radius="xl"
-            variant="default"
-            onClick={() => {
-              window.close();
-            }}
-          >
-            关闭当前页
-          </Button>
-        </Stack>
-      </Card>
-    </main>
-  );
+  return next;
+}
+
+export default async function AuthCompletePage({ searchParams }: AuthCompletePageProps) {
+  const params = await searchParams;
+  const nextPath = normalizeNextPath(params.next);
+
+  return <AuthCompleteClient nextPath={nextPath} />;
 }

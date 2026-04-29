@@ -125,6 +125,8 @@ export function RegistrationGateStoreProvider({ children }: RegistrationGateStor
       }
     };
 
+    let externalSyncRetryTimers: number[] = [];
+
     void syncCurrentUser();
 
     const {
@@ -135,7 +137,18 @@ export function RegistrationGateStoreProvider({ children }: RegistrationGateStor
     });
 
     const handleExternalAuthSync = () => {
-      window.location.reload();
+      setIsLoading(true);
+      void syncCurrentUser();
+
+      externalSyncRetryTimers.forEach((timer) => window.clearTimeout(timer));
+      externalSyncRetryTimers = [
+        window.setTimeout(() => {
+          void syncCurrentUser();
+        }, 600),
+        window.setTimeout(() => {
+          void syncCurrentUser();
+        }, 1800),
+      ];
     };
 
     const handleStorage = (event: StorageEvent) => {
@@ -180,6 +193,7 @@ export function RegistrationGateStoreProvider({ children }: RegistrationGateStor
       subscription.unsubscribe();
       window.removeEventListener('storage', handleStorage);
       channel?.close();
+      externalSyncRetryTimers.forEach((timer) => window.clearTimeout(timer));
     };
   }, []);
 
