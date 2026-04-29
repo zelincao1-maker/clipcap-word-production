@@ -165,6 +165,11 @@ async function runGenerationTaskItemOcr(params: {
       params.item.id,
       `OCR 完成：共得到 ${ocrPages.length} 页可用文本，等待槽位回填。`,
     );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      'OCR 已完成，前端轮询检测到后将自动启动槽位回填。',
+    );
 
     await logEvent({
       ownerId: params.item.owner_id,

@@ -932,7 +932,7 @@ async function extractTextFromVisionPages(input: {
       const batchElapsedMs = Date.now() - batchStartedAt;
       const batchFailedMessage =
         `[PDF Fill][OCR] Failed ${batchLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}) after ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix({
+        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}) after ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}, reason: ${getErrorMessage(normalizedError)}${formatProcessBudgetSuffix({
           processStartedAtMs: input.processStartedAtMs,
           processHardTimeoutMs: input.processHardTimeoutMs,
         })}).`;

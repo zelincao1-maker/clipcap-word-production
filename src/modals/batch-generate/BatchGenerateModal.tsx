@@ -229,15 +229,15 @@ function getStatusLabel(status: string) {
     case 'pending':
       return '等待中';
     case 'uploaded':
-      return '已上传';
+      return '已处理';
     case 'running':
-      return '识别中';
+      return '已处理';
     case 'ocr_running':
-      return 'OCR 识别中';
+      return '已处理';
     case 'ocr_completed':
-      return 'OCR 完成';
+      return '已处理';
     case 'slot_filling':
-      return '槽位回填中';
+      return '已处理';
     case 'review_pending':
       return '待核查';
     case 'reviewed':
@@ -449,14 +449,24 @@ export function BatchGenerateModal({
         return;
       }
 
+      console.info(
+        `[Batch Generate][${item.source_pdf_name}] OCR completed detected by polling; starting slot fill for task item ${item.id}.`,
+      );
       launchedSlotFillItemIdsRef.current.add(item.id);
 
       void startGenerationTaskItemSlotFillMutation
         .mutateAsync(item.id)
         .then(() => {
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill request accepted for task item ${item.id}.`,
+          );
           void refreshTaskLists();
         })
         .catch((error) => {
+          console.error(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill request failed for task item ${item.id}.`,
+            error,
+          );
           notifications.show({
             color: 'red',
             title: '槽位回填失败',
@@ -1053,7 +1063,7 @@ export function BatchGenerateModal({
                         <Badge color={getStatusColor(item.status)} radius="sm" variant="light">
                           {getStatusLabel(item.status)}
                         </Badge>
-                        <Text size="sm">{elapsedSeconds} 秒</Text>
+                        <Text size="sm">已处理 {elapsedSeconds} 秒</Text>
                       </Group>
                     </Group>
 
