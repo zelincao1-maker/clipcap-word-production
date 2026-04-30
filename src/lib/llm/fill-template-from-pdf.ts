@@ -75,6 +75,9 @@ const PROCESS_HARD_TIMEOUT_MS = 300000;
 const PROCESS_OCR_SLOT_FILL_RESERVE_MS = 60000;
 const LLM_CONNECT_TIMEOUT_MS = 60000;
 const PROCESS_ROUTE_FINALIZATION_RESERVE_MS = 15000;
+const KIMI_K25_INSTANT_THINKING_CONFIG = {
+  type: 'disabled',
+} as const;
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 const llmFetchDispatcher = new Agent({
   connect: {
@@ -622,6 +625,7 @@ async function extractSlotWithTextModel(input: {
         signal: controller.signal,
         body: JSON.stringify({
           model: getTextLlmModel(),
+          thinking: KIMI_K25_INSTANT_THINKING_CONFIG,
           messages: [
             {
               role: 'system',
@@ -902,6 +906,7 @@ async function extractTextFromVisionPages(input: {
         signal: controller.signal,
         body: JSON.stringify({
           model: getVisionLlmModel(),
+          thinking: KIMI_K25_INSTANT_THINKING_CONFIG,
           messages: [
             {
               role: 'system',
@@ -1420,6 +1425,7 @@ async function extractAllSlotsWithTextModel(input: {
         signal: controller.signal,
         body: JSON.stringify({
           model: getTextLlmModel(),
+          thinking: KIMI_K25_INSTANT_THINKING_CONFIG,
           messages: [
             {
               role: 'system',

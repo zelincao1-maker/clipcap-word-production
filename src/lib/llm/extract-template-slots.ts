@@ -17,6 +17,9 @@ const MIN_PARAGRAPH_CHARACTER_COUNT = 6;
 const TEMPLATE_EXTRACTION_LLM_CONCURRENCY = 6;
 const EXTRACTION_WAIT_HEARTBEAT_MS = 15000;
 const TEMPLATE_EXTRACTION_LLM_CONNECT_TIMEOUT_MS = 60000;
+const KIMI_K25_INSTANT_THINKING_CONFIG = {
+  type: 'disabled',
+} as const;
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 const templateExtractionFetchDispatcher = new Agent({
   connect: {
@@ -272,6 +275,7 @@ async function requestTextLlmJson(input: {
         signal: controller.signal,
         body: JSON.stringify({
           model: getTextLlmModel(),
+          thinking: KIMI_K25_INSTANT_THINKING_CONFIG,
           messages: [
             {
               role: 'system',

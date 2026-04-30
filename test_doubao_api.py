@@ -16,6 +16,7 @@ def main():
 
     response = client.chat.completions.create(
         model=MODEL,
+        thinking={"type": "disabled"},
         messages=[
             {"role": "system", "content": "你是 Kimi，一个有帮助的助手。"},
             {"role": "user", "content": "你好，请简单介绍一下自己。"},
